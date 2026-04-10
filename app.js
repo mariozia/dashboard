@@ -436,6 +436,15 @@ const pnlFmt = v => (v >= 0 ? '+' : '') + '$' + Math.abs(v).toFixed(2);
 const pnlCls = v => v >= 0 ? 'pnl-positive' : 'pnl-negative';
 
 const coinName = t => { const m = t.match(/^(Bitcoin|Solana|Dogecoin|Ethereum|XRP|BNB|Cardano)/i); return m ? m[1] : t.split(' ')[0]; };
+const COIN_ICONS = {
+  Bitcoin:  'https://assets.coingecko.com/coins/images/1/small/bitcoin.png',
+  Ethereum: 'https://assets.coingecko.com/coins/images/279/small/ethereum.png',
+  Solana:   'https://assets.coingecko.com/coins/images/4128/small/solana.png',
+  Dogecoin: 'https://assets.coingecko.com/coins/images/5/small/dogecoin.png',
+  XRP:      'https://assets.coingecko.com/coins/images/44/small/xrp-symbol-white-128.png',
+  BNB:      'https://assets.coingecko.com/coins/images/825/small/bnb-icon2_2x.png',
+  Cardano:  'https://assets.coingecko.com/coins/images/975/small/cardano.png',
+};
 const timeWin  = t => { const m = t.match(/(\d+:\d+[AP]M-\d+:\d+[AP]M\s+ET)/i); return m ? m[1] : ''; };
 
 function setVal(id, text, cssClass) {
@@ -713,7 +722,10 @@ function renderTradesTable(trades) {
 
     return `<tr class="${t.status === 'pending' ? 'pending-row' : ''}">
       <td style="color:var(--text3)">${t.time}</td>
-      <td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;color:var(--text)">${t.title}</td>
+      <td class="market-cell">
+        ${(() => { const icon = COIN_ICONS[coinName(t.title)]; return icon ? `<img src="${icon}" class="trade-coin-icon" onerror="this.style.display='none'">` : ''; })()}
+        <span class="market-title">${t.title}</span>
+      </td>
       <td>${betCell}</td>
       <td>${actualCell}</td>
       <td>$${t.notional.toFixed(2)}</td>
