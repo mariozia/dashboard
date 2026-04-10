@@ -304,6 +304,8 @@ tbody tr.flash-row td { animation: rowflash .6s ease; }
 .pnl-positive { color: var(--green); font-weight: 700; }
 .pnl-negative { color: var(--red);   font-weight: 700; }
 .pnl-pending  { color: var(--blue);  font-size: 12px; }
+tbody tr.pending-row td { background: #0d1a2e; color: var(--blue); }
+tbody tr.pending-row td:first-child { border-left: 2px solid var(--blue); }
 .pnl-unknown  { color: var(--text3); }
 
 .tx-link { color: var(--text3); font-family: monospace; font-size: 11px; text-decoration: none; }

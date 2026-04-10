@@ -6,9 +6,15 @@ const DATA_API       = 'https://data-api.polymarket.com';
 const POLYGON_RPC    = 'https://polygon-bor-rpc.publicnode.com';
 const USDC_CONTRACT  = '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359';
 const USDCE_CONTRACT = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
-const POLL_INTERVAL  = 2000; // ms — silent, no visible countdown
+const POLL_INTERVAL      = 3000;  // ms — Polymarket API poll
+const CHAIN_POLL_INTERVAL = 2000; // ms — Polygon chain poll (faster)
 const PASS_HASH      = '6fb5194f18297746a5e5101dc3e0c3f5d721104a0612ad65d561d9d4176669a8';
 const OPPOSITE       = { Up: 'Down', Down: 'Up' };
+
+// ERC-20 Transfer topic: Transfer(address,address,uint256)
+const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+// Polymarket CTF Exchange contract (executes trades)
+const CTF_EXCHANGE   = '0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e';
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let allTrades   = [];
@@ -25,8 +31,12 @@ function savePnlCache() {
 let chartInst   = null;
 let chartDayKey = '';
 let prevValues  = {};   // track previous numbers for flash animation
-let pollTimer   = null;
-let isRunning   = false;
+let pollTimer        = null;
+let chainPollTimer   = null;
+let isRunning        = false;
+let lastKnownBlock   = null;
+let pendingChainTxs  = {}; // txHash → pending row data, replaced when API catches up
+let knownApiTxHashes = new Set(); // tracks what the API already returned
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 async function sha256(str) {
@@ -60,6 +70,103 @@ async function erc20Balance(contract) {
   });
   const json = await res.json();
   return parseInt(json.result || '0x0', 16) / 1e6;
+}
+
+// ── Chain Polling (instant detection) ────────────────────────────────────────
+async function rpc(method, params) {
+  const res = await fetch(POLYGON_RPC, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', method, params, id: 1 }),
+  });
+  const json = await res.json();
+  return json.result;
+}
+
+async function getLatestBlock() {
+  const hex = await rpc('eth_blockNumber', []);
+  return parseInt(hex, 16);
+}
+
+async function getBlockTimestamp(blockHex) {
+  const block = await rpc('eth_getBlockByNumber', [blockHex, false]);
+  return block ? parseInt(block.timestamp, 16) : Math.floor(Date.now() / 1000);
+}
+
+// Watch for USDC transfers FROM wallet (= money leaving = a bet being placed)
+async function pollChain() {
+  try {
+    const latestBlock = await getLatestBlock();
+    if (!lastKnownBlock) {
+      lastKnownBlock = latestBlock; // init — don't backfill old txs on first load
+      chainPollTimer = setTimeout(pollChain, CHAIN_POLL_INTERVAL);
+      return;
+    }
+    if (latestBlock <= lastKnownBlock) {
+      chainPollTimer = setTimeout(pollChain, CHAIN_POLL_INTERVAL);
+      return;
+    }
+
+    const fromBlock = '0x' + (lastKnownBlock + 1).toString(16);
+    const toBlock   = '0x' + latestBlock.toString(16);
+    const walletPadded = '0x' + WALLET.slice(2).toLowerCase().padStart(64, '0');
+
+    // Get USDC.e transfers FROM wallet
+    const logs = await rpc('eth_getLogs', [{
+      fromBlock, toBlock,
+      address: [USDC_CONTRACT, USDCE_CONTRACT],
+      topics: [TRANSFER_TOPIC, walletPadded], // FROM wallet
+    }]);
+
+    lastKnownBlock = latestBlock;
+
+    if (!logs || logs.length === 0) {
+      chainPollTimer = setTimeout(pollChain, CHAIN_POLL_INTERVAL);
+      return;
+    }
+
+    for (const log of logs) {
+      const txHash = log.transactionHash;
+      // Skip if already in API data or already pending
+      if (knownApiTxHashes.has(txHash) || pendingChainTxs[txHash]) continue;
+
+      const amount   = parseInt(log.data, 16) / 1e6;
+      const ts       = await getBlockTimestamp(log.blockNumber);
+      const time     = new Date(ts * 1000).toLocaleString('en-US', {
+        month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true,
+      });
+
+      // Add as a pending row immediately
+      pendingChainTxs[txHash] = {
+        ts, time,
+        title:     'Detecting market…',
+        outcome:   '—',
+        actual:    null,
+        notional:  amount,
+        price_pct: null,
+        pnl:       null,
+        pnl_pct:   null,
+        status:    'pending',
+        tx:        txHash,
+        isPending: true,
+      };
+    }
+
+    // Re-render table with pending rows merged in
+    mergeAndRenderTrades();
+  } catch (e) {
+    // silent — chain poll errors don't break the UI
+  }
+  chainPollTimer = setTimeout(pollChain, CHAIN_POLL_INTERVAL);
+}
+
+function mergeAndRenderTrades() {
+  // Pending txs not yet in API
+  const pending = Object.values(pendingChainTxs)
+    .filter(p => !knownApiTxHashes.has(p.tx));
+
+  allTrades = [...pending, ...(allTrades.filter(t => !t.isPending))];
+  filterTrades();
 }
 
 async function fetchAll() {
@@ -111,6 +218,13 @@ function compute(trades, positions, cash) {
   }
 
   const pseudonym = trades[0]?.pseudonym || '';
+
+  // Mark these tx hashes as known so pending rows get dropped
+  for (const t of trades) knownApiTxHashes.add(t.transactionHash);
+  // Drop pending rows the API now covers
+  for (const tx of Object.keys(pendingChainTxs)) {
+    if (knownApiTxHashes.has(tx)) delete pendingChainTxs[tx];
+  }
 
   const enriched = trades.map(t => {
     const pos    = pnlMap[t.conditionId] || pnlCache[t.conditionId];
@@ -342,7 +456,9 @@ function renderTradesTable(trades) {
     const txShort = t.tx ? t.tx.slice(0, 8) + '…' : '';
     const txUrl   = t.tx ? `https://polygonscan.com/tx/${t.tx}` : '#';
 
-    const betCell = `<span class="badge ${t.outcome.toLowerCase()}">${t.outcome}</span>`;
+    const betCell = t.status === 'pending'
+      ? `<span class="pnl-pending">—</span>`
+      : `<span class="badge ${t.outcome.toLowerCase()}">${t.outcome}</span>`;
 
     let actualCell;
     if (t.status === 'live') {
@@ -356,7 +472,9 @@ function renderTradesTable(trades) {
     }
 
     let pnlCell, pnlPctCell;
-    if (t.status === 'live') {
+    if (t.status === 'pending') {
+      pnlCell = pnlPctCell = `<span class="pnl-pending">on-chain ⛓</span>`;
+    } else if (t.status === 'live') {
       pnlCell = pnlPctCell = `<span class="pnl-pending">pending</span>`;
     } else if (t.pnl != null) {
       pnlCell    = `<span class="${pnlCls(t.pnl)}">${pnlFmt(t.pnl)}</span>`;
@@ -365,7 +483,7 @@ function renderTradesTable(trades) {
       pnlCell = pnlPctCell = `<span class="pnl-unknown">—</span>`;
     }
 
-    return `<tr>
+    return `<tr class="${t.status === 'pending' ? 'pending-row' : ''}">
       <td style="color:var(--text3)">${t.time}</td>
       <td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;color:var(--text)">${t.title}</td>
       <td>${betCell}</td>
@@ -397,7 +515,7 @@ async function poll() {
     renderChart(d.daily);
 
     allTrades = d.enriched;
-    filterTrades();
+    mergeAndRenderTrades();
 
     dot.className   = 'live-dot active';
     label.textContent = 'live';
@@ -411,7 +529,8 @@ async function poll() {
 function startPolling() {
   if (isRunning) return;
   isRunning = true;
-  poll();
+  poll();        // Polymarket API every 3s
+  pollChain();   // Polygon chain every 2s — instant trade detection
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
