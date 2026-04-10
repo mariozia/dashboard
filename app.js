@@ -14,7 +14,14 @@ const OPPOSITE       = { Up: 'Down', Down: 'Up' };
 let allTrades   = [];
 let sortKey     = 'ts';
 let sortDir     = -1;
-let pnlCache    = {};   // survives position redemptions
+// Persisted P&L cache — survives page refreshes and redemptions
+const PNL_CACHE_KEY = 'pm_pnl_cache';
+let pnlCache = (() => {
+  try { return JSON.parse(localStorage.getItem(PNL_CACHE_KEY)) || {}; } catch { return {}; }
+})();
+function savePnlCache() {
+  try { localStorage.setItem(PNL_CACHE_KEY, JSON.stringify(pnlCache)); } catch {}
+}
 let chartInst   = null;
 let chartDayKey = '';
 let prevValues  = {};   // track previous numbers for flash animation
@@ -78,13 +85,15 @@ function compute(trades, positions, cash) {
     pnlMap[p.conditionId] = p;
     if (p.redeemable && p.cashPnl !== undefined) {
       pnlCache[p.conditionId] = p;
+      savePnlCache();
     }
   }
 
   const livePos      = positions.filter(p => !p.redeemable);
   const redeemPos    = positions.filter(p => p.redeemable);
-  const portfolio    = livePos.reduce((s, p) => s + (p.currentValue || 0), 0);
+  const openValue    = livePos.reduce((s, p) => s + (p.currentValue || 0), 0);
   const redeemable   = redeemPos.reduce((s, p) => s + (p.currentValue || 0), 0);
+  const portfolio    = cash + openValue + redeemable;
   const sessionPnl   = positions.reduce((s, p) => s + (p.cashPnl || 0), 0);
   const totalInvested = trades.reduce((s, t) => s + t.size * t.price, 0);
 
@@ -329,7 +338,7 @@ function renderTradesTable(trades) {
   $('trades-badge').textContent = sorted.length + ' orders';
   $('trades-pulse').className   = 'pulse-dot' + (sorted.length > 0 ? ' active' : '');
 
-  $('trades-body').innerHTML = sorted.map((t, i) => {
+  $('trades-body').innerHTML = sorted.map(t => {
     const txShort = t.tx ? t.tx.slice(0, 8) + '…' : '';
     const txUrl   = t.tx ? `https://polygonscan.com/tx/${t.tx}` : '#';
 
