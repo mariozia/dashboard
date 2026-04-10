@@ -354,9 +354,11 @@ tbody tr.pending-row td:first-child { border-left: 2px solid rgba(59,130,246,.4)
 .tx-link { color: var(--text3); font-family: 'SF Mono', 'Fira Code', monospace; font-size: 11px; text-decoration: none; transition: color .15s; }
 .tx-link:hover { color: var(--purple2); }
 
-.market-cell { display: flex; align-items: center; gap: 8px; max-width: 260px; }
-.trade-coin-icon { width: 20px; height: 20px; border-radius: 50%; flex-shrink: 0; }
-.market-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.market-cell { display: flex; align-items: center; gap: 10px; }
+.trade-coin-icon { width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; }
+.market-meta { display: flex; flex-direction: column; gap: 1px; }
+.market-date { font-size: 12px; font-weight: 600; color: var(--text); }
+.market-time-win { font-size: 10px; color: var(--text3); }
 
 /* ── Flash animation for value changes ────────────────────────────────────── */
 @keyframes flashGreen { 0%,100% { color: inherit; } 30% { color: var(--green); } }

@@ -492,7 +492,10 @@ function renderTradesTable(trades) {
       <td style="color:var(--text3)">${t.time}</td>
       <td class="market-cell">
         ${(() => { const icon = COIN_ICONS[coinName(t.title)]; return icon ? `<img src="${icon}" class="trade-coin-icon" onerror="this.style.display='none'">` : ''; })()}
-        <span class="market-title">${t.title}</span>
+        <span class="market-meta">
+          <span class="market-date">${new Date(t.ts * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
+          <span class="market-time-win">${timeWin(t.title)}</span>
+        </span>
       </td>
       <td>${betCell}</td>
       <td>${actualCell}</td>
