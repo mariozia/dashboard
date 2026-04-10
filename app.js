@@ -241,51 +241,62 @@ async function saveDepositToDB(dep) {
 }
 
 // ── Deposit History Scan ──────────────────────────────────────────────────────
-// Scans Polygon chain for USDC transfers TO wallet (excluding Polymarket payout contracts)
-// Only runs once per session — tracks progress in app_meta table
 async function scanDepositHistory() {
   try {
     const latestBlock  = await getLatestBlock();
     const walletPadded = '0x' + WALLET.slice(2).toLowerCase().padStart(64, '0');
 
-    // Load last scanned block so we don't re-scan old history
     const { data: metaRow } = await sb.from('app_meta')
       .select('value').eq('key', 'deposit_scan_block').maybeSingle();
     const lastScanned = metaRow ? parseInt(metaRow.value) : 0;
 
-    // Scan at most 90 days back from current if never scanned
-    const historicalStart = latestBlock - 90 * 43200; // 43200 blocks/day on Polygon
+    const historicalStart = latestBlock - 90 * 43200;
     const fromBlock = Math.max(lastScanned + 1, historicalStart);
-    if (fromBlock >= latestBlock) return;
-
-    const knownHashes = new Set(depositHistory.map(d => d.txHash));
-    const CHUNK = 100000; // ~2.3 days per chunk
-
-    for (let b = fromBlock; b <= latestBlock; b += CHUNK) {
-      const toB   = Math.min(b + CHUNK - 1, latestBlock);
-      const logs  = await rpc('eth_getLogs', [{
-        fromBlock: '0x' + b.toString(16),
-        toBlock:   '0x' + toB.toString(16),
-        address:   [USDC_CONTRACT, USDCE_CONTRACT],
-        topics:    [TRANSFER_TOPIC, null, walletPadded], // TO wallet
-      }]).catch(() => []);
-
-      for (const log of (logs || [])) {
-        if (knownHashes.has(log.transactionHash)) continue;
-        const fromAddr = ('0x' + log.topics[1].slice(26)).toLowerCase();
-        if (PAYOUT_CONTRACTS.has(fromAddr)) continue; // skip winnings payouts
-        const amount = parseInt(log.data, 16) / 1e6;
-        if (amount < 1) continue; // ignore dust
-        const ts  = await getBlockTimestamp(log.blockNumber);
-        const dep = { ts, amount, txHash: log.transactionHash, block: parseInt(log.blockNumber, 16) };
-        knownHashes.add(dep.txHash);
-        await saveDepositToDB(dep);
-      }
+    if (fromBlock >= latestBlock) {
+      console.log('Deposit scan: already up to date');
+      return;
     }
 
-    // Save progress so next session only scans new blocks
-    await sb.from('app_meta').upsert({ key: 'deposit_scan_block', value: latestBlock });
-    console.log(`Deposit scan done. Total: ${depositHistory.length} deposits, $${depositHistory.reduce((s,d)=>s+d.amount,0).toFixed(2)} total deposited`);
+    console.log(`Deposit scan: blocks ${fromBlock} → ${latestBlock} (~${Math.round((latestBlock - fromBlock) / 43200)} days)`);
+
+    const knownHashes = new Set(depositHistory.map(d => d.txHash));
+    const CHUNK = 2000; // ~1 hour — safe for all public RPCs
+
+    // Build all chunk ranges
+    const chunks = [];
+    for (let b = fromBlock; b <= latestBlock; b += CHUNK)
+      chunks.push([b, Math.min(b + CHUNK - 1, latestBlock)]);
+
+    // Process in parallel batches of 20
+    const BATCH = 20;
+    let found = 0;
+    for (let i = 0; i < chunks.length; i += BATCH) {
+      await Promise.all(chunks.slice(i, i + BATCH).map(async ([b, toB]) => {
+        const result = await rpc('eth_getLogs', [{
+          fromBlock: '0x' + b.toString(16),
+          toBlock:   '0x' + toB.toString(16),
+          address:   [USDC_CONTRACT, USDCE_CONTRACT],
+          topics:    [TRANSFER_TOPIC, null, walletPadded],
+        }]);
+        if (!Array.isArray(result)) return;
+        for (const log of result) {
+          if (knownHashes.has(log.transactionHash)) continue;
+          const fromAddr = ('0x' + log.topics[1].slice(26)).toLowerCase();
+          if (PAYOUT_CONTRACTS.has(fromAddr)) continue;
+          const amount = parseInt(log.data, 16) / 1e6;
+          if (amount < 1) continue;
+          const ts = await getBlockTimestamp(log.blockNumber);
+          const dep = { ts, amount, txHash: log.transactionHash, block: parseInt(log.blockNumber, 16) };
+          knownHashes.add(dep.txHash);
+          await saveDepositToDB(dep);
+          found++;
+        }
+      }));
+    }
+
+    await sb.from('app_meta').upsert({ key: 'deposit_scan_block', value: String(latestBlock) });
+    const total = depositHistory.reduce((s, d) => s + d.amount, 0);
+    console.log(`Deposit scan done. Found ${found} new deposits. Total: ${depositHistory.length} deposits, $${total.toFixed(2)}`);
 
     if (allTrades.length > 0) renderProfitChart(allTrades, currentProfitPeriod);
   } catch (e) {
