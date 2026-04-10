@@ -18,18 +18,26 @@ const OPPOSITE       = { Up: 'Down', Down: 'Up' };
 const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 // Polymarket CTF Exchange contract (executes trades)
 const CTF_EXCHANGE   = '0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e';
+// Contracts that send USDC TO wallet as winnings/redemptions (NOT deposits)
+const PAYOUT_CONTRACTS = new Set([
+  '0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e', // CTF Exchange
+  '0xc5d563a36ae78145c45a50134d48a1215220f80a', // NegRisk CTF Exchange
+  '0xd91e80cf2e7be2e162c6513ced06f1dd0da35296', // NegRisk Adapter
+  '0x4d97dcd97ec945f40cf65f87097ace5ea0476045', // Conditional Tokens Framework
+]);
 
 // ── Supabase ──────────────────────────────────────────────────────────────────
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ── State ─────────────────────────────────────────────────────────────────────
-let allTrades         = [];
-let sortKey           = 'ts';
-let sortDir           = -1;
-let pnlCache          = {};  // conditionId → position — loaded from Supabase on boot
-let chartInst         = null;
+let allTrades           = [];
+let sortKey             = 'ts';
+let sortDir             = -1;
+let pnlCache            = {};  // conditionId → position — loaded from Supabase on boot
+let chartInst           = null;
 let currentProfitPeriod = 'day';
-let prevValues        = {};   // track previous numbers for flash animation
+let prevValues          = {};   // track previous numbers for flash animation
+let depositHistory      = [];   // [{ts, amount, txHash, block}] — loaded from Supabase on boot
 let pollTimer        = null;
 let chainPollTimer   = null;
 let isRunning        = false;
@@ -110,49 +118,53 @@ async function pollChain() {
     const toBlock   = '0x' + latestBlock.toString(16);
     const walletPadded = '0x' + WALLET.slice(2).toLowerCase().padStart(64, '0');
 
-    // Get USDC.e transfers FROM wallet
-    const logs = await rpc('eth_getLogs', [{
-      fromBlock, toBlock,
-      address: [USDC_CONTRACT, USDCE_CONTRACT],
-      topics: [TRANSFER_TOPIC, walletPadded], // FROM wallet
-    }]);
+    // Fetch both outgoing (bets) and incoming (deposits) transfers in parallel
+    const [outLogs, inLogs] = await Promise.all([
+      rpc('eth_getLogs', [{
+        fromBlock, toBlock,
+        address: [USDC_CONTRACT, USDCE_CONTRACT],
+        topics:  [TRANSFER_TOPIC, walletPadded],  // FROM wallet = bet
+      }]),
+      rpc('eth_getLogs', [{
+        fromBlock, toBlock,
+        address: [USDC_CONTRACT, USDCE_CONTRACT],
+        topics:  [TRANSFER_TOPIC, null, walletPadded], // TO wallet = deposit or winnings
+      }]),
+    ]);
 
     lastKnownBlock = latestBlock;
 
-    if (!logs || logs.length === 0) {
-      chainPollTimer = setTimeout(pollChain, CHAIN_POLL_INTERVAL);
-      return;
-    }
-
-    for (const log of logs) {
+    // ── Outgoing: new bets ────────────────────────────────────────────────────
+    for (const log of (outLogs || [])) {
       const txHash = log.transactionHash;
-      // Skip if already in API data or already pending
       if (knownApiTxHashes.has(txHash) || pendingChainTxs[txHash]) continue;
-
-      const amount   = parseInt(log.data, 16) / 1e6;
-      const ts       = await getBlockTimestamp(log.blockNumber);
-      const time     = new Date(ts * 1000).toLocaleString('en-US', {
+      const amount = parseInt(log.data, 16) / 1e6;
+      const ts     = await getBlockTimestamp(log.blockNumber);
+      const time   = new Date(ts * 1000).toLocaleString('en-US', {
         month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true,
       });
-
-      // Add as a pending row immediately
       pendingChainTxs[txHash] = {
-        ts, time,
-        title:     'Detecting market…',
-        outcome:   '—',
-        actual:    null,
-        notional:  amount,
-        price_pct: null,
-        pnl:       null,
-        pnl_pct:   null,
-        status:    'pending',
-        tx:        txHash,
-        isPending: true,
+        ts, time, title: 'Detecting market…', outcome: '—', actual: null,
+        notional: amount, price_pct: null, pnl: null, pnl_pct: null,
+        status: 'pending', tx: txHash, isPending: true,
       };
     }
 
-    // Re-render table with pending rows merged in
-    mergeAndRenderTrades();
+    // ── Incoming: deposits (not payouts from Polymarket) ──────────────────────
+    let newDeposit = false;
+    for (const log of (inLogs || [])) {
+      const fromAddr = ('0x' + log.topics[1].slice(26)).toLowerCase();
+      if (PAYOUT_CONTRACTS.has(fromAddr)) continue;
+      const amount = parseInt(log.data, 16) / 1e6;
+      if (amount < 1) continue;
+      if (depositHistory.some(d => d.txHash === log.transactionHash)) continue;
+      const ts  = await getBlockTimestamp(log.blockNumber);
+      await saveDepositToDB({ ts, amount, txHash: log.transactionHash, block: parseInt(log.blockNumber, 16) });
+      newDeposit = true;
+    }
+
+    if (Object.keys(pendingChainTxs).length > 0) mergeAndRenderTrades();
+    if (newDeposit) renderProfitChart(allTrades, currentProfitPeriod);
   } catch (e) {
     // silent — chain poll errors don't break the UI
   }
@@ -187,9 +199,10 @@ async function fetchAll() {
 let outcomeCache = {}; // slug → { winner, outcomes, prices } — loaded from Supabase on boot
 
 async function loadCachesFromDB() {
-  const [outRes, pnlRes] = await Promise.all([
+  const [outRes, pnlRes, depRes] = await Promise.all([
     sb.from('outcome_cache').select('*'),
     sb.from('pnl_cache').select('*'),
+    sb.from('deposits').select('*').order('ts', { ascending: true }),
   ]);
   if (outRes.error) console.error('outcome_cache load error:', outRes.error);
   if (pnlRes.error) console.error('pnl_cache load error:', pnlRes.error);
@@ -197,7 +210,10 @@ async function loadCachesFromDB() {
     outcomeCache[row.slug] = { winner: row.winner, outcomes: row.outcomes, prices: row.prices };
   for (const row of pnlRes.data || [])
     pnlCache[row.condition_id] = row.data;
-  console.log(`DB loaded: ${(outRes.data||[]).length} outcomes, ${(pnlRes.data||[]).length} pnl entries`);
+  depositHistory = (depRes.data || []).map(r => ({
+    ts: r.ts, amount: parseFloat(r.amount), txHash: r.tx_hash, block: r.block_num,
+  }));
+  console.log(`DB loaded: ${(outRes.data||[]).length} outcomes, ${(pnlRes.data||[]).length} pnl, ${depositHistory.length} deposits`);
 }
 
 async function saveOutcomeToDB(slug, entry) {
@@ -211,6 +227,70 @@ async function savePnlToDB(conditionId, posData) {
   pnlCache[conditionId] = posData;
   const { error } = await sb.from('pnl_cache').upsert({ condition_id: conditionId, data: posData });
   if (error) console.error('pnl save error:', error);
+}
+
+async function saveDepositToDB(dep) {
+  if (depositHistory.some(d => d.txHash === dep.txHash)) return;
+  depositHistory.push(dep);
+  depositHistory.sort((a, b) => a.ts - b.ts);
+  const { error } = await sb.from('deposits').upsert({
+    tx_hash: dep.txHash, amount: dep.amount, ts: dep.ts, block_num: dep.block,
+  });
+  if (error) console.error('deposit save error:', error);
+  else console.log(`Deposit saved: $${dep.amount.toFixed(2)} at ${new Date(dep.ts * 1000).toLocaleString()}`);
+}
+
+// ── Deposit History Scan ──────────────────────────────────────────────────────
+// Scans Polygon chain for USDC transfers TO wallet (excluding Polymarket payout contracts)
+// Only runs once per session — tracks progress in app_meta table
+async function scanDepositHistory() {
+  try {
+    const latestBlock  = await getLatestBlock();
+    const walletPadded = '0x' + WALLET.slice(2).toLowerCase().padStart(64, '0');
+
+    // Load last scanned block so we don't re-scan old history
+    const { data: metaRow } = await sb.from('app_meta')
+      .select('value').eq('key', 'deposit_scan_block').maybeSingle();
+    const lastScanned = metaRow ? parseInt(metaRow.value) : 0;
+
+    // Scan at most 90 days back from current if never scanned
+    const historicalStart = latestBlock - 90 * 43200; // 43200 blocks/day on Polygon
+    const fromBlock = Math.max(lastScanned + 1, historicalStart);
+    if (fromBlock >= latestBlock) return;
+
+    const knownHashes = new Set(depositHistory.map(d => d.txHash));
+    const CHUNK = 100000; // ~2.3 days per chunk
+
+    for (let b = fromBlock; b <= latestBlock; b += CHUNK) {
+      const toB   = Math.min(b + CHUNK - 1, latestBlock);
+      const logs  = await rpc('eth_getLogs', [{
+        fromBlock: '0x' + b.toString(16),
+        toBlock:   '0x' + toB.toString(16),
+        address:   [USDC_CONTRACT, USDCE_CONTRACT],
+        topics:    [TRANSFER_TOPIC, null, walletPadded], // TO wallet
+      }]).catch(() => []);
+
+      for (const log of (logs || [])) {
+        if (knownHashes.has(log.transactionHash)) continue;
+        const fromAddr = ('0x' + log.topics[1].slice(26)).toLowerCase();
+        if (PAYOUT_CONTRACTS.has(fromAddr)) continue; // skip winnings payouts
+        const amount = parseInt(log.data, 16) / 1e6;
+        if (amount < 1) continue; // ignore dust
+        const ts  = await getBlockTimestamp(log.blockNumber);
+        const dep = { ts, amount, txHash: log.transactionHash, block: parseInt(log.blockNumber, 16) };
+        knownHashes.add(dep.txHash);
+        await saveDepositToDB(dep);
+      }
+    }
+
+    // Save progress so next session only scans new blocks
+    await sb.from('app_meta').upsert({ key: 'deposit_scan_block', value: latestBlock });
+    console.log(`Deposit scan done. Total: ${depositHistory.length} deposits, $${depositHistory.reduce((s,d)=>s+d.amount,0).toFixed(2)} total deposited`);
+
+    if (allTrades.length > 0) renderProfitChart(allTrades, currentProfitPeriod);
+  } catch (e) {
+    console.error('scanDepositHistory error:', e);
+  }
 }
 
 // Fetch outcomes for slugs we don't have yet — runs in background, then re-renders
@@ -451,41 +531,64 @@ function setPeriod(p) {
   renderProfitChart(allTrades, p);
 }
 
-const STARTING_BALANCE = 100;
-
 function renderProfitChart(trades, period) {
   const canvas = $('chart-profit');
   if (!canvas) return;
 
   const resolved = trades.filter(t => t.pnl != null && t.ts && (t.status === 'won' || t.status === 'lost'));
+  const totalDeposited = depositHistory.reduce((s, d) => s + d.amount, 0);
+
+  // Build a unified event timeline: deposits + trade resolutions
+  const events = [
+    ...depositHistory.map(d => ({ ts: d.ts, delta: d.amount, type: 'deposit' })),
+    ...resolved.map(t => ({ ts: t.ts, delta: t.pnl, type: 'trade' })),
+  ].sort((a, b) => a.ts - b.ts);
+
   const now    = Date.now() / 1000;
   const cutoff = { day: now - 86400, week: now - 86400 * 7, month: now - 86400 * 30 }[period];
-  const filtered = resolved.filter(t => t.ts >= cutoff).sort((a, b) => a.ts - b.ts);
 
-  const labels = ['Start'];
-  const data   = [STARTING_BALANCE];
-  let balance  = STARTING_BALANCE;
+  // Carry-in: value of portfolio at the start of this period
+  let carryIn = 0;
+  for (const ev of events) { if (ev.ts < cutoff) carryIn += ev.delta; }
 
-  for (const t of filtered) {
-    balance += t.pnl;
-    const d = new Date(t.ts * 1000);
-    const label = period === 'day'
+  const periodEvents = events.filter(e => e.ts >= cutoff);
+
+  const labels    = [''];
+  const data      = [+carryIn.toFixed(2)];
+  const isDep     = [false];
+  let balance     = carryIn;
+
+  for (const ev of periodEvents) {
+    balance += ev.delta;
+    const d   = new Date(ev.ts * 1000);
+    const lbl = period === 'day'
       ? d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })
       : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-    labels.push(label);
+    labels.push(lbl);
     data.push(+balance.toFixed(2));
+    isDep.push(ev.type === 'deposit');
   }
 
-  const isPositive = (data[data.length - 1] || STARTING_BALANCE) >= STARTING_BALANCE;
+  if (data.length <= 1) { labels.push('Now'); data.push(carryIn); isDep.push(false); }
+
+  const currentVal = data[data.length - 1];
+  const baseline   = totalDeposited > 0 ? totalDeposited : 0;
+  const isPositive = baseline === 0 ? currentVal >= 0 : currentVal >= baseline;
   const lineColor  = isPositive ? '#00d395' : '#f6465d';
   const pulse      = $('chart-pulse');
   if (pulse) pulse.className = 'pulse-dot' + (isPositive ? ' active' : ' error');
 
   if (chartInst) chartInst.destroy();
   const ctx      = canvas.getContext('2d');
-  const gradient = ctx.createLinearGradient(0, 0, 0, 280);
+  const gradient = ctx.createLinearGradient(0, 0, 0, 260);
   gradient.addColorStop(0, isPositive ? 'rgba(0,211,149,0.18)' : 'rgba(246,70,93,0.18)');
   gradient.addColorStop(1, 'rgba(0,0,0,0)');
+
+  // Deposit markers: purple diamonds; trade points: small or hidden
+  const ptRadius = isDep.map(d => d ? 7 : (data.length > 40 ? 0 : 2));
+  const ptStyle  = isDep.map(d => d ? 'rectRot' : 'circle');
+  const ptBg     = isDep.map(d => d ? '#a78bfa' : 'transparent');
+  const ptBd     = isDep.map(d => d ? '#6d28d9' : 'transparent');
 
   chartInst = new Chart(canvas, {
     type: 'line',
@@ -497,11 +600,13 @@ function renderProfitChart(trades, period) {
         borderWidth: 2,
         backgroundColor: gradient,
         fill: true,
-        tension: 0.4,
-        pointRadius: data.length > 40 ? 0 : 3,
-        pointHoverRadius: 5,
-        pointBackgroundColor: lineColor,
-        pointBorderColor: 'transparent',
+        tension: 0.3,
+        pointRadius: ptRadius,
+        pointHoverRadius: 6,
+        pointStyle: ptStyle,
+        pointBackgroundColor: ptBg,
+        pointBorderColor: ptBd,
+        pointBorderWidth: 2,
       }],
     },
     options: {
@@ -519,8 +624,8 @@ function renderProfitChart(trades, period) {
           callbacks: {
             label: ctx => {
               const val  = ctx.raw;
-              const diff = val - STARTING_BALANCE;
-              return ` $${val.toFixed(2)}  (${diff >= 0 ? '+' : ''}$${diff.toFixed(2)})`;
+              const diff = baseline > 0 ? val - baseline : val;
+              return ` $${val.toFixed(2)}  (${diff >= 0 ? '+' : ''}$${diff.toFixed(2)} vs deposited)`;
             },
           },
         },
@@ -660,9 +765,10 @@ async function poll() {
 async function startPolling() {
   if (isRunning) return;
   isRunning = true;
-  await loadCachesFromDB();  // load persisted caches from Supabase first
+  await loadCachesFromDB();  // load persisted caches (outcomes, pnl, deposits)
   poll();
   pollChain();
+  setTimeout(scanDepositHistory, 3000); // background scan after initial load
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
