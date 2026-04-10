@@ -220,9 +220,11 @@ async function fetchMissingOutcomes(trades) {
         const event = data[0];
         const mkt   = event.markets?.[0];
         if (!mkt) return;
+        // Only resolve when the market is actually closed
+        if (!mkt.closed) return;
         const outcomes = JSON.parse(mkt.outcomes || '[]');
         const prices   = JSON.parse(mkt.outcomePrices || '[]');
-        // Find winner: the outcome whose price is "1"
+        // Find winner: the outcome whose price resolved to 1
         const winIdx = prices.findIndex(p => parseFloat(p) >= 0.99);
         const winner = winIdx >= 0 ? outcomes[winIdx] : null;
         if (winner) {
@@ -304,9 +306,10 @@ function compute(trades, positions, cash) {
       if (actual) {
         const won = actual === t.outcome;
         status    = won ? 'won' : 'lost';
-        // Reconstruct P&L: won → earned (1-price)*size, lost → lost price*size
-        pnl     = won ? +(t.size * (1 - t.price)).toFixed(4) : +(-(t.size * t.price)).toFixed(4);
-        pnl_pct = won ? +((1 - t.price) / t.price * 100).toFixed(1) : -100;
+        // Reconstruct P&L from trade price: won → notional*(1/price - 1), lost → -notional
+        const price = t.price; // 0-1
+        pnl     = won ? +(t.size * t.price * (1 / price - 1)).toFixed(2) : +(-(t.size * t.price)).toFixed(2);
+        pnl_pct = won ? +((1 / price - 1) * 100).toFixed(1) : -100;
       }
     }
 
@@ -587,15 +590,15 @@ async function poll() {
     // Background: fill in missing outcomes from gamma API, re-render if anything changed
     fetchMissingOutcomes(allTrades).then(changed => {
       if (changed) {
-        // Re-enrich with newly cached outcomes
         allTrades = allTrades.map(t => {
           if (t.status !== 'unknown' || !t.eventSlug || !outcomeCache[t.eventSlug]) return t;
           const actual = outcomeCache[t.eventSlug].winner;
           if (!actual) return t;
           const won   = actual === t.outcome;
+          const price = t.price_pct / 100; // convert back to 0-1
           return { ...t, actual, status: won ? 'won' : 'lost',
-            pnl:     won ? +(t.notional * (1/t.price_pct * 100 - 1)).toFixed(4) : -t.notional,
-            pnl_pct: won ? +((1 - t.price_pct/100) / (t.price_pct/100) * 100).toFixed(1) : -100,
+            pnl:     won ? +(t.notional * (1 / price - 1)).toFixed(2) : +(-t.notional).toFixed(2),
+            pnl_pct: won ? +((1 / price - 1) * 100).toFixed(1) : -100,
           };
         });
         mergeAndRenderTrades();
