@@ -451,6 +451,8 @@ function setPeriod(p) {
   renderProfitChart(allTrades, p);
 }
 
+const STARTING_BALANCE = 100;
+
 function renderProfitChart(trades, period) {
   const canvas = $('chart-profit');
   if (!canvas) return;
@@ -460,23 +462,21 @@ function renderProfitChart(trades, period) {
   const cutoff = { day: now - 86400, week: now - 86400 * 7, month: now - 86400 * 30 }[period];
   const filtered = resolved.filter(t => t.ts >= cutoff).sort((a, b) => a.ts - b.ts);
 
-  let cumulative = 0;
-  const labels = [];
-  const data   = [];
+  const labels = ['Start'];
+  const data   = [STARTING_BALANCE];
+  let balance  = STARTING_BALANCE;
 
   for (const t of filtered) {
-    cumulative += t.pnl;
+    balance += t.pnl;
     const d = new Date(t.ts * 1000);
     const label = period === 'day'
       ? d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })
       : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
     labels.push(label);
-    data.push(+cumulative.toFixed(2));
+    data.push(+balance.toFixed(2));
   }
 
-  if (data.length === 0) { labels.push('Now'); data.push(0); }
-
-  const isPositive = (data[data.length - 1] || 0) >= 0;
+  const isPositive = (data[data.length - 1] || STARTING_BALANCE) >= STARTING_BALANCE;
   const lineColor  = isPositive ? '#00d395' : '#f6465d';
   const pulse      = $('chart-pulse');
   if (pulse) pulse.className = 'pulse-dot' + (isPositive ? ' active' : ' error');
@@ -516,7 +516,13 @@ function renderProfitChart(trades, period) {
           titleColor: '#8892a4',
           bodyColor: '#e2e8f0',
           padding: 12,
-          callbacks: { label: ctx => ' Cumulative P&L: ' + (ctx.raw >= 0 ? '+' : '') + '$' + ctx.raw.toFixed(2) },
+          callbacks: {
+            label: ctx => {
+              const val  = ctx.raw;
+              const diff = val - STARTING_BALANCE;
+              return ` $${val.toFixed(2)}  (${diff >= 0 ? '+' : ''}$${diff.toFixed(2)})`;
+            },
+          },
         },
       },
       scales: {
@@ -525,7 +531,7 @@ function renderProfitChart(trades, period) {
           grid:  { color: 'rgba(30,37,53,0.6)', drawBorder: false },
         },
         y: {
-          ticks: { color: '#4a5568', callback: v => (v >= 0 ? '+' : '') + '$' + v },
+          ticks: { color: '#4a5568', callback: v => '$' + v },
           grid:  { color: 'rgba(30,37,53,0.8)', drawBorder: false },
         },
       },
