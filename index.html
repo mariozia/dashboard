@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Polymarket Bot Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- Auth Gate -->
+<div id="auth-gate">
+  <div class="auth-box">
+    <div class="auth-logo">PM</div>
+    <h2>Bot Dashboard</h2>
+    <p>Enter your password to continue</p>
+    <input id="pwd-input" type="password" placeholder="Password"
+      onkeydown="if(event.key==='Enter')checkPassword()">
+    <button onclick="checkPassword()">Unlock</button>
+    <div id="pwd-error"></div>
+  </div>
+</div>
+
+<!-- App -->
+<div id="app" style="display:none">
+
+  <header>
+    <div class="header-left">
+      <div class="header-title">Polymarket Bot</div>
+      <div class="header-wallet" id="wallet"></div>
+    </div>
+    <div class="header-right">
+      <div class="live-indicator">
+        <span class="live-dot" id="live-dot"></span>
+        <span id="live-label">connecting</span>
+      </div>
+      <div class="header-pseudo" id="pseudonym"></div>
+    </div>
+  </header>
+
+  <main>
+
+    <!-- Balance Row -->
+    <section class="balance-row">
+      <div class="balance-card primary">
+        <div class="bc-label">Cash Balance</div>
+        <div class="bc-value" id="cash-balance">—</div>
+        <div class="bc-sub">Available to bet</div>
+      </div>
+      <div class="balance-card">
+        <div class="bc-label">Portfolio</div>
+        <div class="bc-value" id="portfolio-value">—</div>
+        <div class="bc-sub">Open positions</div>
+      </div>
+      <div class="balance-card accent">
+        <div class="bc-label">Redeemable</div>
+        <div class="bc-value" id="redeemable-value">—</div>
+        <div class="bc-sub">Unclaimed winnings</div>
+      </div>
+      <div class="balance-card">
+        <div class="bc-label">Session P&L</div>
+        <div class="bc-value" id="session-pnl">—</div>
+        <div class="bc-sub">Visible positions</div>
+      </div>
+    </section>
+
+    <!-- Stats Row -->
+    <section class="stats-row">
+      <div class="stat-card" id="stat-trades"></div>
+      <div class="stat-card" id="stat-volume"></div>
+      <div class="stat-card" id="stat-winrate"></div>
+      <div class="stat-card" id="stat-up"></div>
+      <div class="stat-card" id="stat-down"></div>
+    </section>
+
+    <!-- Live Positions -->
+    <section class="panel">
+      <div class="panel-header">
+        <div class="panel-title">
+          <span class="pulse-dot" id="pos-pulse"></span>
+          Live Positions
+          <span class="panel-badge" id="pos-badge"></span>
+        </div>
+        <div class="panel-meta" id="pos-meta"></div>
+      </div>
+      <div id="positions-content" class="positions-content"></div>
+    </section>
+
+    <!-- Chart -->
+    <section class="panel">
+      <div class="panel-header">
+        <div class="panel-title">Daily Volume</div>
+      </div>
+      <div class="chart-wrap"><canvas id="chart-daily"></canvas></div>
+    </section>
+
+    <!-- Trades Table -->
+    <section class="panel">
+      <div class="panel-header">
+        <div class="panel-title">
+          <span class="pulse-dot" id="trades-pulse"></span>
+          Completed Orders
+          <span class="panel-badge" id="trades-badge"></span>
+        </div>
+        <input class="search-input" type="text" id="search"
+          placeholder="Search market..." oninput="filterTrades()">
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th onclick="sortBy('ts')">Time</th>
+              <th onclick="sortBy('title')">Market</th>
+              <th onclick="sortBy('outcome')">Bot Bet</th>
+              <th onclick="sortBy('actual')">Actual</th>
+              <th onclick="sortBy('notional')">Invested</th>
+              <th onclick="sortBy('price_pct')">Price</th>
+              <th onclick="sortBy('pnl')">P&L</th>
+              <th onclick="sortBy('pnl_pct')">P&L %</th>
+              <th>Tx</th>
+            </tr>
+          </thead>
+          <tbody id="trades-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
