@@ -244,31 +244,6 @@ main { max-width: 1440px; margin: 0 auto; padding: 28px 32px 56px; }
 }
 .pulse-dot.error { background: var(--red); }
 
-/* ── Period Toggle ────────────────────────────────────────────────────────── */
-.period-toggle {
-  display: flex; gap: 4px;
-  background: var(--surface2);
-  padding: 3px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-}
-.period-btn {
-  background: transparent;
-  border: none;
-  color: var(--text3);
-  font-size: 11px; font-weight: 700;
-  padding: 5px 14px;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: all .15s;
-  text-transform: uppercase; letter-spacing: .05em;
-}
-.period-btn:hover { color: var(--text2); }
-.period-btn.active {
-  background: var(--surface3);
-  color: var(--purple2);
-  border: 1px solid var(--border2);
-}
 
 /* ── Position Cards ───────────────────────────────────────────────────────── */
 .positions-content { padding: 20px 24px; }
@@ -328,8 +303,6 @@ main { max-width: 1440px; margin: 0 auto; padding: 28px 32px 56px; }
 .price-bar-fill.up   { background: var(--green); box-shadow: 0 0 8px rgba(0,211,149,.4); }
 .price-bar-fill.down { background: var(--red);   box-shadow: 0 0 8px rgba(246,70,93,.4); }
 
-/* ── Chart ────────────────────────────────────────────────────────────────── */
-.chart-wrap { padding: 20px 24px; height: 260px; }
 
 /* ── Trades Table ─────────────────────────────────────────────────────────── */
 .search-input {

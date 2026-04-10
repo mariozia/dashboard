@@ -4,8 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Polymarket Bot Dashboard</title>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -91,23 +90,8 @@
       <div id="positions-content" class="positions-content"></div>
     </section>
 
-    <!-- Profitability Chart -->
-    <section class="panel">
-      <div class="panel-header">
-        <div class="panel-title">
-          <span class="pulse-dot" id="chart-pulse"></span>
-          Profitability
-        </div>
-        <div class="period-toggle">
-          <button class="period-btn active" data-period="day" onclick="setPeriod('day')">1D</button>
-          <button class="period-btn" data-period="week" onclick="setPeriod('week')">7D</button>
-          <button class="period-btn" data-period="month" onclick="setPeriod('month')">30D</button>
-        </div>
-      </div>
-      <div class="chart-wrap"><canvas id="chart-profit"></canvas></div>
-    </section>
 
-    <!-- Trades Table -->
+<!-- Trades Table -->
     <section class="panel">
       <div class="panel-header">
         <div class="panel-title">
