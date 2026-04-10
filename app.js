@@ -20,7 +20,7 @@ const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a
 const CTF_EXCHANGE   = '0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e';
 
 // ── Supabase ──────────────────────────────────────────────────────────────────
-const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let allTrades   = [];
@@ -187,24 +187,30 @@ async function fetchAll() {
 let outcomeCache = {}; // slug → { winner, outcomes, prices } — loaded from Supabase on boot
 
 async function loadCachesFromDB() {
-  const [{ data: outcomes }, { data: pnls }] = await Promise.all([
+  const [outRes, pnlRes] = await Promise.all([
     sb.from('outcome_cache').select('*'),
     sb.from('pnl_cache').select('*'),
   ]);
-  for (const row of outcomes || [])
+  if (outRes.error) console.error('outcome_cache load error:', outRes.error);
+  if (pnlRes.error) console.error('pnl_cache load error:', pnlRes.error);
+  for (const row of outRes.data || [])
     outcomeCache[row.slug] = { winner: row.winner, outcomes: row.outcomes, prices: row.prices };
-  for (const row of pnls || [])
+  for (const row of pnlRes.data || [])
     pnlCache[row.condition_id] = row.data;
+  console.log(`DB loaded: ${(outRes.data||[]).length} outcomes, ${(pnlRes.data||[]).length} pnl entries`);
 }
 
 async function saveOutcomeToDB(slug, entry) {
   outcomeCache[slug] = entry;
-  await sb.from('outcome_cache').upsert({ slug, winner: entry.winner, outcomes: entry.outcomes, prices: entry.prices });
+  const { error } = await sb.from('outcome_cache').upsert({ slug, winner: entry.winner, outcomes: entry.outcomes, prices: entry.prices });
+  if (error) console.error('outcome save error:', error);
+  else console.log('saved outcome:', slug, entry.winner);
 }
 
 async function savePnlToDB(conditionId, posData) {
   pnlCache[conditionId] = posData;
-  await sb.from('pnl_cache').upsert({ condition_id: conditionId, data: posData });
+  const { error } = await sb.from('pnl_cache').upsert({ condition_id: conditionId, data: posData });
+  if (error) console.error('pnl save error:', error);
 }
 
 // Fetch outcomes for slugs we don't have yet — runs in background, then re-renders
