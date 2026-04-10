@@ -7,6 +7,8 @@ const POLYGON_RPC    = 'https://polygon-bor-rpc.publicnode.com';
 const USDC_CONTRACT  = '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359';
 const USDCE_CONTRACT = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
 const GAMMA_API          = 'https://gamma-api.polymarket.com';
+const SUPABASE_URL       = 'https://kfclevcoyzxaubxcxzdd.supabase.co';
+const SUPABASE_ANON_KEY  = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtmY2xldmNveXp4YXVieGN4emRkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU4MzA1MDYsImV4cCI6MjA5MTQwNjUwNn0.zf2j_odQJpoPrdWGhJXnM5NmMkaKK2iQGA51eRSu9Do';
 const POLL_INTERVAL      = 3000;  // ms — Polymarket API poll
 const CHAIN_POLL_INTERVAL = 2000; // ms — Polygon chain poll (faster)
 const PASS_HASH      = '6fb5194f18297746a5e5101dc3e0c3f5d721104a0612ad65d561d9d4176669a8';
@@ -17,18 +19,14 @@ const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a
 // Polymarket CTF Exchange contract (executes trades)
 const CTF_EXCHANGE   = '0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e';
 
+// ── Supabase ──────────────────────────────────────────────────────────────────
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
 // ── State ─────────────────────────────────────────────────────────────────────
 let allTrades   = [];
 let sortKey     = 'ts';
 let sortDir     = -1;
-// Persisted P&L cache — survives page refreshes and redemptions
-const PNL_CACHE_KEY = 'pm_pnl_cache';
-let pnlCache = (() => {
-  try { return JSON.parse(localStorage.getItem(PNL_CACHE_KEY)) || {}; } catch { return {}; }
-})();
-function savePnlCache() {
-  try { localStorage.setItem(PNL_CACHE_KEY, JSON.stringify(pnlCache)); } catch {}
-}
+let pnlCache     = {};  // conditionId → position — loaded from Supabase on boot
 let chartInst   = null;
 let chartDayKey = '';
 let prevValues  = {};   // track previous numbers for flash animation
@@ -185,14 +183,28 @@ async function fetchAll() {
   };
 }
 
-// ── Outcome cache (gamma API) ─────────────────────────────────────────────────
-// Maps eventSlug → { winner: 'Up'|'Down', outcomes: [...], prices: [...] }
-const OUTCOME_CACHE_KEY = 'pm_outcome_cache';
-let outcomeCache = (() => {
-  try { return JSON.parse(localStorage.getItem(OUTCOME_CACHE_KEY)) || {}; } catch { return {}; }
-})();
-function saveOutcomeCache() {
-  try { localStorage.setItem(OUTCOME_CACHE_KEY, JSON.stringify(outcomeCache)); } catch {}
+// ── Outcome cache (gamma API → Supabase) ─────────────────────────────────────
+let outcomeCache = {}; // slug → { winner, outcomes, prices } — loaded from Supabase on boot
+
+async function loadCachesFromDB() {
+  const [{ data: outcomes }, { data: pnls }] = await Promise.all([
+    sb.from('outcome_cache').select('*'),
+    sb.from('pnl_cache').select('*'),
+  ]);
+  for (const row of outcomes || [])
+    outcomeCache[row.slug] = { winner: row.winner, outcomes: row.outcomes, prices: row.prices };
+  for (const row of pnls || [])
+    pnlCache[row.condition_id] = row.data;
+}
+
+async function saveOutcomeToDB(slug, entry) {
+  outcomeCache[slug] = entry;
+  await sb.from('outcome_cache').upsert({ slug, winner: entry.winner, outcomes: entry.outcomes, prices: entry.prices });
+}
+
+async function savePnlToDB(conditionId, posData) {
+  pnlCache[conditionId] = posData;
+  await sb.from('pnl_cache').upsert({ condition_id: conditionId, data: posData });
 }
 
 // Fetch outcomes for slugs we don't have yet — runs in background, then re-renders
@@ -228,8 +240,7 @@ async function fetchMissingOutcomes(trades) {
         const winIdx = prices.findIndex(p => parseFloat(p) >= 0.99);
         const winner = winIdx >= 0 ? outcomes[winIdx] : null;
         if (winner) {
-          outcomeCache[slug] = { winner, outcomes, prices };
-          saveOutcomeCache();
+          saveOutcomeToDB(slug, { winner, outcomes, prices });
           changed = true;
         }
       } catch {}
@@ -245,8 +256,7 @@ function compute(trades, positions, cash) {
   for (const p of positions) {
     pnlMap[p.conditionId] = p;
     if (p.redeemable && p.cashPnl !== undefined) {
-      pnlCache[p.conditionId] = p;
-      savePnlCache();
+      savePnlToDB(p.conditionId, p);
     }
   }
 
@@ -614,11 +624,12 @@ async function poll() {
   pollTimer = setTimeout(poll, POLL_INTERVAL);
 }
 
-function startPolling() {
+async function startPolling() {
   if (isRunning) return;
   isRunning = true;
-  poll();        // Polymarket API every 3s
-  pollChain();   // Polygon chain every 2s — instant trade detection
+  await loadCachesFromDB();  // load persisted caches from Supabase first
+  poll();
+  pollChain();
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
