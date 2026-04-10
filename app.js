@@ -6,7 +6,7 @@ const DATA_API       = 'https://data-api.polymarket.com';
 const POLYGON_RPC    = 'https://polygon-bor-rpc.publicnode.com';
 const USDC_CONTRACT  = '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359';
 const USDCE_CONTRACT = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
-const GAMMA_API          = 'https://gamma-api.polymarket.com';
+const GAMMA_API          = '/.netlify/functions/gamma';
 const SUPABASE_URL       = 'https://kfclevcoyzxaubxcxzdd.supabase.co';
 const SUPABASE_ANON_KEY  = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtmY2xldmNveXp4YXVieGN4emRkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU4MzA1MDYsImV4cCI6MjA5MTQwNjUwNn0.zf2j_odQJpoPrdWGhJXnM5NmMkaKK2iQGA51eRSu9Do';
 const POLL_INTERVAL      = 3000;  // ms — Polymarket API poll
@@ -232,7 +232,7 @@ async function fetchMissingOutcomes(trades) {
   for (const chunk of chunks) {
     await Promise.all(chunk.map(async slug => {
       try {
-        const res  = await fetch(`${GAMMA_API}/events?slug=${slug}`);
+        const res  = await fetch(`${GAMMA_API}?slug=${slug}`);
         const data = await res.json();
         if (!data || !data[0]) return;
         const event = data[0];
