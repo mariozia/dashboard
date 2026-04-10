@@ -28,7 +28,10 @@
 
   <header>
     <div class="header-left">
-      <div class="header-title">Polymarket Bot</div>
+      <div class="header-brand">
+        <div class="header-icon">PM</div>
+        <div class="header-title">Polymarket Bot</div>
+      </div>
       <div class="header-wallet" id="wallet"></div>
     </div>
     <div class="header-right">
@@ -88,12 +91,20 @@
       <div id="positions-content" class="positions-content"></div>
     </section>
 
-    <!-- Chart -->
+    <!-- Profitability Chart -->
     <section class="panel">
       <div class="panel-header">
-        <div class="panel-title">Daily Volume</div>
+        <div class="panel-title">
+          <span class="pulse-dot" id="chart-pulse"></span>
+          Profitability
+        </div>
+        <div class="period-toggle">
+          <button class="period-btn active" data-period="day" onclick="setPeriod('day')">1D</button>
+          <button class="period-btn" data-period="week" onclick="setPeriod('week')">7D</button>
+          <button class="period-btn" data-period="month" onclick="setPeriod('month')">30D</button>
+        </div>
       </div>
-      <div class="chart-wrap"><canvas id="chart-daily"></canvas></div>
+      <div class="chart-wrap"><canvas id="chart-profit"></canvas></div>
     </section>
 
     <!-- Trades Table -->

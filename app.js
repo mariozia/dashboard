@@ -23,13 +23,13 @@ const CTF_EXCHANGE   = '0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e';
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ── State ─────────────────────────────────────────────────────────────────────
-let allTrades   = [];
-let sortKey     = 'ts';
-let sortDir     = -1;
-let pnlCache     = {};  // conditionId → position — loaded from Supabase on boot
-let chartInst   = null;
-let chartDayKey = '';
-let prevValues  = {};   // track previous numbers for flash animation
+let allTrades         = [];
+let sortKey           = 'ts';
+let sortDir           = -1;
+let pnlCache          = {};  // conditionId → position — loaded from Supabase on boot
+let chartInst         = null;
+let currentProfitPeriod = 'day';
+let prevValues        = {};   // track previous numbers for flash animation
 let pollTimer        = null;
 let chainPollTimer   = null;
 let isRunning        = false;
@@ -400,114 +400,134 @@ function renderStats(d) {
 
 // ── Render: positions ─────────────────────────────────────────────────────────
 function renderPositions(positions) {
-  const live     = positions.filter(p => p.curPrice > 0 && !p.redeemable);
-  const redeem   = positions.filter(p => p.redeemable);
-  const won      = redeem.filter(p => p.cashPnl > 0);
-  const lost     = redeem.filter(p => p.cashPnl <= 0);
+  // Only show truly active (in-window) positions — expired ones disappear automatically
+  const live = positions.filter(p => p.curPrice > 0 && !p.redeemable);
 
-  $('pos-pulse').className = 'pulse-dot' + (live.length > 0 ? ' active' : '');
+  $('pos-pulse').className   = 'pulse-dot' + (live.length > 0 ? ' active' : '');
   $('pos-badge').textContent = live.length > 0 ? `${live.length} active` : 'idle';
   $('pos-meta').textContent  = `updated ${new Date().toLocaleTimeString()}`;
 
-  let html = '';
-
-  if (live.length === 0 && redeem.length === 0) {
-    html = '<div class="positions-empty">No open positions — bot is idle</div>';
-  } else {
-    if (live.length > 0) {
-      html += '<div class="positions-grid">';
-      for (const p of live) {
-        const dir      = p.outcome.toLowerCase();
-        const pricePct = Math.round(p.curPrice * 100);
-        html += `
-          <div class="pos-card live-${dir}">
-            <span class="pos-tag live">live</span>
-            <div class="pos-top">
-              ${p.icon ? `<img class="pos-icon" src="${p.icon}" onerror="this.style.display='none'">` : `<div class="pos-icon-fb">${coinName(p.title).slice(0,3).toUpperCase()}</div>`}
-              <div class="pos-info">
-                <div class="pos-name">${coinName(p.title)} 5-min</div>
-                <div class="pos-time">${timeWin(p.title)}</div>
-              </div>
-              <span class="dir-badge ${dir}">${p.outcome.toUpperCase()}</span>
-            </div>
-            <div class="pos-stats">
-              <div class="ps-item"><div class="ps-label">Invested</div><div class="ps-val">$${p.initialValue.toFixed(2)}</div></div>
-              <div class="ps-item"><div class="ps-label">Value</div><div class="ps-val">$${p.currentValue.toFixed(2)}</div></div>
-              <div class="ps-item"><div class="ps-label">P&L</div><div class="ps-val ${p.cashPnl >= 0 ? 'green' : 'red'}">${pnlFmt(p.cashPnl)}</div></div>
-            </div>
-            <div class="price-bar">
-              <div class="price-bar-labels"><span>Probability</span><span>${pricePct}%</span></div>
-              <div class="price-bar-track"><div class="price-bar-fill ${dir}" style="width:${pricePct}%"></div></div>
-            </div>
-          </div>`;
-      }
-      html += '</div>';
-    }
-
-    if (won.length > 0) {
-      html += '<div class="positions-grid">';
-      for (const p of won) {
-        const dir = p.outcome.toLowerCase();
-        html += `
-          <div class="pos-card won">
-            <span class="pos-tag claim">claim</span>
-            <div class="pos-top">
-              ${p.icon ? `<img class="pos-icon" src="${p.icon}" onerror="this.style.display='none'">` : `<div class="pos-icon-fb">${coinName(p.title).slice(0,3).toUpperCase()}</div>`}
-              <div class="pos-info">
-                <div class="pos-name">${coinName(p.title)} 5-min</div>
-                <div class="pos-time">${timeWin(p.title)}</div>
-              </div>
-              <span class="dir-badge ${dir}">${p.outcome.toUpperCase()}</span>
-            </div>
-            <div class="pos-stats">
-              <div class="ps-item"><div class="ps-label">Invested</div><div class="ps-val">$${p.initialValue.toFixed(2)}</div></div>
-              <div class="ps-item"><div class="ps-label">Redeemable</div><div class="ps-val green">$${p.currentValue.toFixed(2)}</div></div>
-              <div class="ps-item"><div class="ps-label">P&L</div><div class="ps-val green">${pnlFmt(p.cashPnl)}</div></div>
-            </div>
-          </div>`;
-      }
-      html += '</div>';
-    }
-
-    if (redeem.length > 0) {
-      html += `<div class="redeem-footer">
-        <span>${won.length > 0 ? `${won.length} winning · ` : ''}${lost.length} lost · ${redeem.length} total redeemable</span>
-        <a href="https://polymarket.com/portfolio" target="_blank">Manage on Polymarket →</a>
-      </div>`;
-    }
+  if (live.length === 0) {
+    $('positions-content').innerHTML = '<div class="positions-empty">No active positions — bot is idle</div>';
+    return;
   }
 
+  let html = '<div class="positions-grid">';
+  for (const p of live) {
+    const dir      = p.outcome.toLowerCase();
+    const pricePct = Math.round(p.curPrice * 100);
+    html += `
+      <div class="pos-card live-${dir}">
+        <span class="pos-tag live">live</span>
+        <div class="pos-top">
+          ${p.icon ? `<img class="pos-icon" src="${p.icon}" onerror="this.style.display='none'">` : `<div class="pos-icon-fb">${coinName(p.title).slice(0,3).toUpperCase()}</div>`}
+          <div class="pos-info">
+            <div class="pos-name">${coinName(p.title)} 5-min</div>
+            <div class="pos-time">${timeWin(p.title)}</div>
+          </div>
+          <span class="dir-badge ${dir}">${p.outcome.toUpperCase()}</span>
+        </div>
+        <div class="pos-stats">
+          <div class="ps-item"><div class="ps-label">Invested</div><div class="ps-val">$${p.initialValue.toFixed(2)}</div></div>
+          <div class="ps-item"><div class="ps-label">Value</div><div class="ps-val">$${p.currentValue.toFixed(2)}</div></div>
+          <div class="ps-item"><div class="ps-label">P&L</div><div class="ps-val ${p.cashPnl >= 0 ? 'green' : 'red'}">${pnlFmt(p.cashPnl)}</div></div>
+        </div>
+        <div class="price-bar">
+          <div class="price-bar-labels"><span>Probability</span><span>${pricePct}%</span></div>
+          <div class="price-bar-track"><div class="price-bar-fill ${dir}" style="width:${pricePct}%"></div></div>
+        </div>
+      </div>`;
+  }
+  html += '</div>';
   $('positions-content').innerHTML = html;
 }
 
-// ── Render: chart ─────────────────────────────────────────────────────────────
-function renderChart(daily) {
-  const dayKey = Object.keys(daily).sort().join(',');
-  if (dayKey === chartDayKey) return; // no change
-  chartDayKey = dayKey;
+// ── Render: profitability chart ───────────────────────────────────────────────
+function setPeriod(p) {
+  currentProfitPeriod = p;
+  document.querySelectorAll('.period-btn').forEach(b => {
+    b.classList.toggle('active', b.getAttribute('data-period') === p);
+  });
+  renderProfitChart(allTrades, p);
+}
+
+function renderProfitChart(trades, period) {
+  const canvas = $('chart-profit');
+  if (!canvas) return;
+
+  const resolved = trades.filter(t => t.pnl != null && t.ts && (t.status === 'won' || t.status === 'lost'));
+  const now    = Date.now() / 1000;
+  const cutoff = { day: now - 86400, week: now - 86400 * 7, month: now - 86400 * 30 }[period];
+  const filtered = resolved.filter(t => t.ts >= cutoff).sort((a, b) => a.ts - b.ts);
+
+  let cumulative = 0;
+  const labels = [];
+  const data   = [];
+
+  for (const t of filtered) {
+    cumulative += t.pnl;
+    const d = new Date(t.ts * 1000);
+    const label = period === 'day'
+      ? d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })
+      : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    labels.push(label);
+    data.push(+cumulative.toFixed(2));
+  }
+
+  if (data.length === 0) { labels.push('Now'); data.push(0); }
+
+  const isPositive = (data[data.length - 1] || 0) >= 0;
+  const lineColor  = isPositive ? '#00d395' : '#f6465d';
+  const pulse      = $('chart-pulse');
+  if (pulse) pulse.className = 'pulse-dot' + (isPositive ? ' active' : ' error');
 
   if (chartInst) chartInst.destroy();
-  const days = Object.keys(daily).sort();
-  chartInst = new Chart($('chart-daily'), {
-    type: 'bar',
+  const ctx      = canvas.getContext('2d');
+  const gradient = ctx.createLinearGradient(0, 0, 0, 280);
+  gradient.addColorStop(0, isPositive ? 'rgba(0,211,149,0.18)' : 'rgba(246,70,93,0.18)');
+  gradient.addColorStop(1, 'rgba(0,0,0,0)');
+
+  chartInst = new Chart(canvas, {
+    type: 'line',
     data: {
-      labels: days,
+      labels,
       datasets: [{
-        data: days.map(d => +daily[d].toFixed(2)),
-        backgroundColor: '#7c3aed60',
-        borderColor: '#7c3aed',
-        borderWidth: 1,
-        borderRadius: 4,
+        data,
+        borderColor: lineColor,
+        borderWidth: 2,
+        backgroundColor: gradient,
+        fill: true,
+        tension: 0.4,
+        pointRadius: data.length > 40 ? 0 : 3,
+        pointHoverRadius: 5,
+        pointBackgroundColor: lineColor,
+        pointBorderColor: 'transparent',
       }],
     },
     options: {
       responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { display: false }, tooltip: {
-        callbacks: { label: ctx => ' $' + ctx.raw.toFixed(2) }
-      }},
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#141922',
+          borderColor: '#1e2535',
+          borderWidth: 1,
+          titleColor: '#8892a4',
+          bodyColor: '#e2e8f0',
+          padding: 12,
+          callbacks: { label: ctx => ' Cumulative P&L: ' + (ctx.raw >= 0 ? '+' : '') + '$' + ctx.raw.toFixed(2) },
+        },
+      },
       scales: {
-        x: { ticks: { color: '#4a5568', font: { size: 10 } }, grid: { color: '#1e2535' } },
-        y: { ticks: { color: '#4a5568', callback: v => '$' + v }, grid: { color: '#1e2535' } },
+        x: {
+          ticks: { color: '#4a5568', font: { size: 10 }, maxTicksLimit: 8, maxRotation: 0 },
+          grid:  { color: 'rgba(30,37,53,0.6)', drawBorder: false },
+        },
+        y: {
+          ticks: { color: '#4a5568', callback: v => (v >= 0 ? '+' : '') + '$' + v },
+          grid:  { color: 'rgba(30,37,53,0.8)', drawBorder: false },
+        },
       },
     },
   });
@@ -598,10 +618,10 @@ async function poll() {
     renderBalance(d);
     renderStats({ ...d, trades: trades.length });
     renderPositions(positions);
-    renderChart(d.daily);
 
     allTrades = d.enriched;
     mergeAndRenderTrades();
+    renderProfitChart(allTrades, currentProfitPeriod);
 
     // Background: fill in missing outcomes from gamma API, re-render if anything changed
     fetchMissingOutcomes(allTrades).then(changed => {
@@ -618,6 +638,7 @@ async function poll() {
           };
         });
         mergeAndRenderTrades();
+        renderProfitChart(allTrades, currentProfitPeriod);
       }
     });
 
