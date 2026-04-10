@@ -6,6 +6,7 @@ const DATA_API       = 'https://data-api.polymarket.com';
 const POLYGON_RPC    = 'https://polygon-bor-rpc.publicnode.com';
 const USDC_CONTRACT  = '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359';
 const USDCE_CONTRACT = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+const GAMMA_API          = 'https://gamma-api.polymarket.com';
 const POLL_INTERVAL      = 3000;  // ms — Polymarket API poll
 const CHAIN_POLL_INTERVAL = 2000; // ms — Polygon chain poll (faster)
 const PASS_HASH      = '6fb5194f18297746a5e5101dc3e0c3f5d721104a0612ad65d561d9d4176669a8';
@@ -184,6 +185,57 @@ async function fetchAll() {
   };
 }
 
+// ── Outcome cache (gamma API) ─────────────────────────────────────────────────
+// Maps eventSlug → { winner: 'Up'|'Down', outcomes: [...], prices: [...] }
+const OUTCOME_CACHE_KEY = 'pm_outcome_cache';
+let outcomeCache = (() => {
+  try { return JSON.parse(localStorage.getItem(OUTCOME_CACHE_KEY)) || {}; } catch { return {}; }
+})();
+function saveOutcomeCache() {
+  try { localStorage.setItem(OUTCOME_CACHE_KEY, JSON.stringify(outcomeCache)); } catch {}
+}
+
+// Fetch outcomes for slugs we don't have yet — runs in background, then re-renders
+async function fetchMissingOutcomes(trades) {
+  const missing = [...new Set(
+    trades
+      .filter(t => t.status === 'unknown' && t.eventSlug && !outcomeCache[t.eventSlug])
+      .map(t => t.eventSlug)
+  )].slice(0, 20); // max 20 per cycle to avoid rate limiting
+
+  if (missing.length === 0) return false;
+
+  // Fetch in parallel, 5 at a time
+  const chunks = [];
+  for (let i = 0; i < missing.length; i += 5)
+    chunks.push(missing.slice(i, i + 5));
+
+  let changed = false;
+  for (const chunk of chunks) {
+    await Promise.all(chunk.map(async slug => {
+      try {
+        const res  = await fetch(`${GAMMA_API}/events?slug=${slug}`);
+        const data = await res.json();
+        if (!data || !data[0]) return;
+        const event = data[0];
+        const mkt   = event.markets?.[0];
+        if (!mkt) return;
+        const outcomes = JSON.parse(mkt.outcomes || '[]');
+        const prices   = JSON.parse(mkt.outcomePrices || '[]');
+        // Find winner: the outcome whose price is "1"
+        const winIdx = prices.findIndex(p => parseFloat(p) >= 0.99);
+        const winner = winIdx >= 0 ? outcomes[winIdx] : null;
+        if (winner) {
+          outcomeCache[slug] = { winner, outcomes, prices };
+          saveOutcomeCache();
+          changed = true;
+        }
+      } catch {}
+    }));
+  }
+  return changed;
+}
+
 // ── Compute ───────────────────────────────────────────────────────────────────
 function compute(trades, positions, cash) {
   // Build P&L map + update cache
@@ -227,12 +279,13 @@ function compute(trades, positions, cash) {
   }
 
   const enriched = trades.map(t => {
-    const pos    = pnlMap[t.conditionId] || pnlCache[t.conditionId];
+    const pos      = pnlMap[t.conditionId] || pnlCache[t.conditionId];
     const notional = t.size * t.price;
-    const time   = new Date(t.timestamp * 1000).toLocaleString('en-US', {
+    const time     = new Date(t.timestamp * 1000).toLocaleString('en-US', {
       month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true,
     });
     let pnl = null, pnl_pct = null, status = 'unknown', actual = null;
+
     if (pos) {
       pnl     = pos.cashPnl;
       pnl_pct = pos.percentPnl;
@@ -244,8 +297,22 @@ function compute(trades, positions, cash) {
         actual = won ? t.outcome : OPPOSITE[t.outcome];
       }
     }
+
+    // Fall back to gamma outcome cache for historical trades with no position data
+    if (status === 'unknown' && t.eventSlug && outcomeCache[t.eventSlug]) {
+      actual = outcomeCache[t.eventSlug].winner;
+      if (actual) {
+        const won = actual === t.outcome;
+        status    = won ? 'won' : 'lost';
+        // Reconstruct P&L: won → earned (1-price)*size, lost → lost price*size
+        pnl     = won ? +(t.size * (1 - t.price)).toFixed(4) : +(-(t.size * t.price)).toFixed(4);
+        pnl_pct = won ? +((1 - t.price) / t.price * 100).toFixed(1) : -100;
+      }
+    }
+
     return { ts: t.timestamp, time, title: t.title, outcome: t.outcome, actual,
-             notional, price_pct: t.price * 100, pnl, pnl_pct, status, tx: t.transactionHash };
+             notional, price_pct: t.price * 100, pnl, pnl_pct, status,
+             tx: t.transactionHash, eventSlug: t.eventSlug };
   });
 
   return { cash, portfolio, redeemable, sessionPnl, totalInvested, winRate,
@@ -516,6 +583,24 @@ async function poll() {
 
     allTrades = d.enriched;
     mergeAndRenderTrades();
+
+    // Background: fill in missing outcomes from gamma API, re-render if anything changed
+    fetchMissingOutcomes(allTrades).then(changed => {
+      if (changed) {
+        // Re-enrich with newly cached outcomes
+        allTrades = allTrades.map(t => {
+          if (t.status !== 'unknown' || !t.eventSlug || !outcomeCache[t.eventSlug]) return t;
+          const actual = outcomeCache[t.eventSlug].winner;
+          if (!actual) return t;
+          const won   = actual === t.outcome;
+          return { ...t, actual, status: won ? 'won' : 'lost',
+            pnl:     won ? +(t.notional * (1/t.price_pct * 100 - 1)).toFixed(4) : -t.notional,
+            pnl_pct: won ? +((1 - t.price_pct/100) / (t.price_pct/100) * 100).toFixed(1) : -100,
+          };
+        });
+        mergeAndRenderTrades();
+      }
+    });
 
     dot.className   = 'live-dot active';
     label.textContent = 'live';
