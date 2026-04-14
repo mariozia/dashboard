@@ -315,42 +315,6 @@ function compute(trades, positions, cash) {
              tx: t.transactionHash, eventSlug: t.eventSlug };
   });
 
-  // Guarantee every position appears in the table.
-  // Use conditionId as the key — covers both missing trades AND trades whose pnlMap lookup failed.
-  const enrichedConditionIds = new Set(enriched.map(e => e.conditionId).filter(Boolean));
-  for (const p of positions) {
-    // Skip if we already have a row that correctly shows this position as live
-    const existingRow = enriched.find(e => e.conditionId === p.conditionId);
-    if (existingRow && existingRow.status === 'live') continue;
-    // If no row at all, or row exists but misses live status — upsert
-    if (existingRow) {
-      // Update the existing row in place with accurate position data
-      existingRow.pnl      = p.cashPnl;
-      existingRow.pnl_pct  = p.percentPnl;
-      existingRow.notional = p.initialValue || existingRow.notional;
-      existingRow.status   = p.curPrice > 0 && !p.redeemable ? 'live'
-                           : p.redeemable ? (p.cashPnl > 0 ? 'won' : 'lost') : existingRow.status;
-      existingRow.actual   = p.redeemable ? (p.cashPnl > 0 ? p.outcome : OPPOSITE[p.outcome]) : existingRow.actual;
-      continue;
-    }
-    // No row at all — synthesize one
-    const notional = p.initialValue || 0;
-    const price    = p.avgPrice || 0;
-    const ts       = p.endDate ? (new Date(p.endDate).getTime() / 1000 - 300) : (Date.now() / 1000);
-    const status   = p.curPrice > 0 && !p.redeemable ? 'live'
-                   : p.redeemable ? (p.cashPnl > 0 ? 'won' : 'lost') : 'unknown';
-    const actual   = p.redeemable ? (p.cashPnl > 0 ? p.outcome : OPPOSITE[p.outcome]) : null;
-    enriched.push({
-      conditionId: p.conditionId,
-      ts, time: new Date(ts * 1000).toLocaleString('en-US', {
-        month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true,
-      }),
-      title: p.title, outcome: p.outcome, actual,
-      notional, price_pct: price * 100,
-      pnl: p.cashPnl, pnl_pct: p.percentPnl,
-      status, tx: null, eventSlug: p.eventSlug,
-    });
-  }
 
   return { cash, portfolio, redeemable, sessionPnl, totalInvested, winRate,
            upCount, downCount, totalVol, daily, pseudonym, pnlMap, enriched, positions };
@@ -566,6 +530,34 @@ async function poll() {
     renderPositions(positions);
 
     allTrades = d.enriched;
+
+    // Hard-guarantee: every live position has a row in the table.
+    // Do this AFTER enriched is built so we always have fresh position data.
+    const livePositions = positions.filter(p => p.curPrice > 0 && !p.redeemable);
+    for (const p of livePositions) {
+      const existingIdx = allTrades.findIndex(t => t.conditionId === p.conditionId);
+      const liveRow = {
+        conditionId: p.conditionId,
+        ts:          Date.now() / 1000,
+        time:        new Date().toLocaleString('en-US', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', hour12:true }),
+        title:       p.title,
+        outcome:     p.outcome,
+        actual:      null,
+        notional:    p.initialValue || 0,
+        price_pct:   (p.avgPrice || 0) * 100,
+        pnl:         p.cashPnl,
+        pnl_pct:     p.percentPnl,
+        status:      'live',
+        tx:          null,
+        eventSlug:   p.eventSlug,
+      };
+      if (existingIdx >= 0) {
+        allTrades[existingIdx] = { ...allTrades[existingIdx], ...liveRow };
+      } else {
+        allTrades = [liveRow, ...allTrades];
+      }
+    }
+
     mergeAndRenderTrades();
 
     // Background: fill in missing outcomes from gamma API, re-render if anything changed
