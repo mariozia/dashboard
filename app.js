@@ -315,6 +315,29 @@ function compute(trades, positions, cash) {
              tx: t.transactionHash, eventSlug: t.eventSlug };
   });
 
+  // Positions that have no matching trade in the API yet — add them as synthetic rows
+  const tradeConditionIds = new Set(trades.map(t => t.conditionId));
+  for (const p of positions) {
+    if (tradeConditionIds.has(p.conditionId)) continue;
+    const notional = p.initialValue || 0;
+    const price    = p.avgPrice || 0;
+    const ts       = p.endDate ? (new Date(p.endDate).getTime() / 1000 - 300) : (Date.now() / 1000);
+    const pnl      = p.redeemable ? (p.cashPnl || null) : (p.curPrice > 0 ? p.cashPnl : null);
+    const status   = p.curPrice > 0 && !p.redeemable ? 'live'
+                   : p.redeemable ? (p.cashPnl > 0 ? 'won' : 'lost') : 'unknown';
+    const actual   = p.redeemable ? (p.cashPnl > 0 ? p.outcome : OPPOSITE[p.outcome]) : null;
+    enriched.push({
+      ts, time: new Date(ts * 1000).toLocaleString('en-US', {
+        month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true,
+      }),
+      title: p.title, outcome: p.outcome, actual,
+      notional, price_pct: price * 100, pnl,
+      pnl_pct: p.redeemable ? (p.percentPnl || null) : null,
+      status, tx: null, eventSlug: p.eventSlug,
+      fromPosition: true,
+    });
+  }
+
   return { cash, portfolio, redeemable, sessionPnl, totalInvested, winRate,
            upCount, downCount, totalVol, daily, pseudonym, pnlMap, enriched, positions };
 }
