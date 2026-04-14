@@ -317,7 +317,7 @@ main { max-width: 1440px; margin: 0 auto; padding: 28px 32px 56px; }
   transition: border-color .15s, box-shadow .15s;
 }
 .search-input:focus { border-color: var(--purple); box-shadow: 0 0 0 3px rgba(109,40,217,.12); }
-.table-wrap { overflow-x: auto; max-height: 520px; overflow-y: auto; }
+.table-wrap { overflow-x: auto; }
 
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 thead th {
@@ -353,6 +353,10 @@ tbody tr.pending-row td:first-child { border-left: 2px solid rgba(59,130,246,.4)
 
 .tx-link { color: var(--text3); font-family: 'SF Mono', 'Fira Code', monospace; font-size: 11px; text-decoration: none; transition: color .15s; }
 .tx-link:hover { color: var(--purple2); }
+
+.time-cell { display: flex; flex-direction: column; gap: 1px; }
+.time-date { font-size: 12px; font-weight: 600; color: var(--text2); }
+.time-hour { font-size: 10px; color: var(--text3); }
 
 .market-cell { display: flex; align-items: center; gap: 10px; }
 .trade-coin-icon { width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; }

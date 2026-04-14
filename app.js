@@ -150,8 +150,9 @@ function mergeAndRenderTrades() {
 async function fetchAll() {
   const cb = `_=${Date.now()}`;
   const [posRes, tradeRes, usdc, usdce] = await Promise.all([
-    fetch(`${DATA_API}/positions?user=${WALLET}&limit=500&${cb}`),
-    fetch(`${DATA_API}/trades?user=${WALLET}&limit=500&${cb}`),
+    // Increase the API limit so more historical trades are returned
+    fetch(`${DATA_API}/positions?user=${WALLET}&limit=2000&${cb}`),
+    fetch(`${DATA_API}/trades?user=${WALLET}&limit=2000&${cb}`),
     erc20Balance(USDC_CONTRACT),
     erc20Balance(USDCE_CONTRACT),
   ]);
@@ -489,7 +490,10 @@ function renderTradesTable(trades) {
     }
 
     return `<tr class="${t.status === 'pending' ? 'pending-row' : ''}">
-      <td style="color:var(--text3)">${t.time}</td>
+      <td class="time-cell">
+        <span class="time-date">${new Date(t.ts * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
+        <span class="time-hour">${new Date(t.ts * 1000).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}</span>
+      </td>
       <td class="market-cell">
         ${(() => { const icon = COIN_ICONS[coinName(t.title)]; return icon ? `<img src="${icon}" class="trade-coin-icon" onerror="this.style.display='none'">` : ''; })()}
         <span class="market-meta">
