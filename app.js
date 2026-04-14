@@ -310,31 +310,45 @@ function compute(trades, positions, cash) {
       }
     }
 
-    return { ts: t.timestamp, time, title: t.title, outcome: t.outcome, actual,
+    return { conditionId: t.conditionId, ts: t.timestamp, time, title: t.title, outcome: t.outcome, actual,
              notional, price_pct: t.price * 100, pnl, pnl_pct, status,
              tx: t.transactionHash, eventSlug: t.eventSlug };
   });
 
-  // Positions that have no matching trade in the API yet — add them as synthetic rows
-  const tradeConditionIds = new Set(trades.map(t => t.conditionId));
+  // Guarantee every position appears in the table.
+  // Use conditionId as the key — covers both missing trades AND trades whose pnlMap lookup failed.
+  const enrichedConditionIds = new Set(enriched.map(e => e.conditionId).filter(Boolean));
   for (const p of positions) {
-    if (tradeConditionIds.has(p.conditionId)) continue;
+    // Skip if we already have a row that correctly shows this position as live
+    const existingRow = enriched.find(e => e.conditionId === p.conditionId);
+    if (existingRow && existingRow.status === 'live') continue;
+    // If no row at all, or row exists but misses live status — upsert
+    if (existingRow) {
+      // Update the existing row in place with accurate position data
+      existingRow.pnl      = p.cashPnl;
+      existingRow.pnl_pct  = p.percentPnl;
+      existingRow.notional = p.initialValue || existingRow.notional;
+      existingRow.status   = p.curPrice > 0 && !p.redeemable ? 'live'
+                           : p.redeemable ? (p.cashPnl > 0 ? 'won' : 'lost') : existingRow.status;
+      existingRow.actual   = p.redeemable ? (p.cashPnl > 0 ? p.outcome : OPPOSITE[p.outcome]) : existingRow.actual;
+      continue;
+    }
+    // No row at all — synthesize one
     const notional = p.initialValue || 0;
     const price    = p.avgPrice || 0;
     const ts       = p.endDate ? (new Date(p.endDate).getTime() / 1000 - 300) : (Date.now() / 1000);
-    const pnl      = p.redeemable ? (p.cashPnl || null) : (p.curPrice > 0 ? p.cashPnl : null);
     const status   = p.curPrice > 0 && !p.redeemable ? 'live'
                    : p.redeemable ? (p.cashPnl > 0 ? 'won' : 'lost') : 'unknown';
     const actual   = p.redeemable ? (p.cashPnl > 0 ? p.outcome : OPPOSITE[p.outcome]) : null;
     enriched.push({
+      conditionId: p.conditionId,
       ts, time: new Date(ts * 1000).toLocaleString('en-US', {
         month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true,
       }),
       title: p.title, outcome: p.outcome, actual,
-      notional, price_pct: price * 100, pnl,
-      pnl_pct: p.redeemable ? (p.percentPnl || null) : null,
+      notional, price_pct: price * 100,
+      pnl: p.cashPnl, pnl_pct: p.percentPnl,
       status, tx: null, eventSlug: p.eventSlug,
-      fromPosition: true,
     });
   }
 
