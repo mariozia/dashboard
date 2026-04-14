@@ -200,14 +200,14 @@ async function fetchMissingOutcomes(trades) {
     trades
       .filter(t => t.status === 'unknown' && t.eventSlug && !outcomeCache[t.eventSlug])
       .map(t => t.eventSlug)
-  )].slice(0, 20); // max 20 per cycle to avoid rate limiting
+  )];
 
   if (missing.length === 0) return false;
 
-  // Fetch in parallel, 5 at a time
+  // Fetch in parallel batches of 10
   const chunks = [];
-  for (let i = 0; i < missing.length; i += 5)
-    chunks.push(missing.slice(i, i + 5));
+  for (let i = 0; i < missing.length; i += 10)
+    chunks.push(missing.slice(i, i + 10));
 
   let changed = false;
   for (const chunk of chunks) {
@@ -593,6 +593,24 @@ async function startPolling() {
   await loadCachesFromDB();
   poll();
   pollChain();
+  // After first poll settles, do a full historical outcome scan
+  setTimeout(async () => {
+    const changed = await fetchMissingOutcomes(allTrades);
+    if (changed) {
+      allTrades = allTrades.map(t => {
+        if (t.status !== 'unknown' || !t.eventSlug || !outcomeCache[t.eventSlug]) return t;
+        const actual = outcomeCache[t.eventSlug].winner;
+        if (!actual) return t;
+        const won   = actual === t.outcome;
+        const price = t.price_pct / 100;
+        return { ...t, actual, status: won ? 'won' : 'lost',
+          pnl:     won ? +(t.notional * (1 / price - 1)).toFixed(2) : +(-t.notional).toFixed(2),
+          pnl_pct: won ? +((1 / price - 1) * 100).toFixed(1) : -100,
+        };
+      });
+      mergeAndRenderTrades();
+    }
+  }, 5000);
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
