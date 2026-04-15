@@ -23,11 +23,12 @@ const CTF_EXCHANGE   = '0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e';
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ── State ─────────────────────────────────────────────────────────────────────
-let allTrades    = [];
-let sortKey      = 'ts';
-let sortDir      = -1;
-let pnlCache     = {};  // conditionId → position — loaded from Supabase on boot
-let prevValues   = {};  // track previous numbers for flash animation
+let allTrades        = [];
+let sortKey          = 'ts';
+let sortDir          = -1;
+let pnlCache         = {};  // conditionId → position — loaded from Supabase on boot
+let prevValues       = {};  // track previous numbers for flash animation
+let tradesHistory    = {};  // conditionId → row — loaded from Supabase on boot
 let pollTimer        = null;
 let chainPollTimer   = null;
 let isRunning        = false;
@@ -167,17 +168,21 @@ async function fetchAll() {
 let outcomeCache = {}; // slug → { winner, outcomes, prices } — loaded from Supabase on boot
 
 async function loadCachesFromDB() {
-  const [outRes, pnlRes] = await Promise.all([
+  const [outRes, pnlRes, histRes] = await Promise.all([
     sb.from('outcome_cache').select('*'),
     sb.from('pnl_cache').select('*'),
+    sb.from('trades_history').select('*').order('first_seen_ts', { ascending: false }),
   ]);
-  if (outRes.error) console.error('outcome_cache load error:', outRes.error);
-  if (pnlRes.error) console.error('pnl_cache load error:', pnlRes.error);
+  if (outRes.error)  console.error('outcome_cache load error:', outRes.error);
+  if (pnlRes.error)  console.error('pnl_cache load error:', pnlRes.error);
+  if (histRes.error) console.error('trades_history load error:', histRes.error);
   for (const row of outRes.data || [])
     outcomeCache[row.slug] = { winner: row.winner, outcomes: row.outcomes, prices: row.prices };
   for (const row of pnlRes.data || [])
     pnlCache[row.condition_id] = row.data;
-  console.log(`DB loaded: ${(outRes.data||[]).length} outcomes, ${(pnlRes.data||[]).length} pnl entries`);
+  for (const row of histRes.data || [])
+    tradesHistory[row.condition_id] = row;
+  console.log(`DB loaded: ${(outRes.data||[]).length} outcomes, ${(pnlRes.data||[]).length} pnl, ${(histRes.data||[]).length} history`);
 }
 
 async function saveOutcomeToDB(slug, entry) {
@@ -191,6 +196,30 @@ async function savePnlToDB(conditionId, posData) {
   pnlCache[conditionId] = posData;
   const { error } = await sb.from('pnl_cache').upsert({ condition_id: conditionId, data: posData });
   if (error) console.error('pnl save error:', error);
+}
+
+// ── Trade History (permanent record in Supabase) ──────────────────────────────
+async function upsertTradeHistory(pos, resolvedStatus, pnl, pnlPct, actual) {
+  const now = Math.floor(Date.now() / 1000);
+  const existing = tradesHistory[pos.conditionId];
+  const row = {
+    condition_id:  pos.conditionId,
+    title:         pos.title,
+    outcome:       pos.outcome,
+    event_slug:    pos.eventSlug,
+    notional:      pos.initialValue || 0,
+    avg_price:     pos.avgPrice || 0,
+    status:        resolvedStatus || 'live',
+    pnl:           pnl  ?? existing?.pnl  ?? null,
+    pnl_pct:       pnlPct ?? existing?.pnl_pct ?? null,
+    actual:        actual ?? existing?.actual ?? null,
+    first_seen_ts: existing?.first_seen_ts || now,
+    resolved_ts:   resolvedStatus && resolvedStatus !== 'live' ? now : (existing?.resolved_ts || null),
+    updated_at:    new Date().toISOString(),
+  };
+  tradesHistory[pos.conditionId] = row;
+  const { error } = await sb.from('trades_history').upsert(row);
+  if (error) console.error('trades_history save error:', error);
 }
 
 
@@ -531,8 +560,42 @@ async function poll() {
 
     allTrades = d.enriched;
 
-    // Hard-guarantee: every live position has a row in the table.
-    // Do this AFTER enriched is built so we always have fresh position data.
+    // ── Persist every position to Supabase trades_history ────────────────────
+    for (const p of positions) {
+      if (p.curPrice > 0 && !p.redeemable) {
+        // Live — save/update as live
+        upsertTradeHistory(p, 'live', p.cashPnl, p.percentPnl, null);
+      } else if (p.redeemable) {
+        // Resolved — update with final outcome
+        const actual = p.cashPnl > 0 ? p.outcome : OPPOSITE[p.outcome];
+        upsertTradeHistory(p, p.cashPnl > 0 ? 'won' : 'lost', p.cashPnl, p.percentPnl, actual);
+      }
+    }
+
+    // ── Merge Supabase history into allTrades so nothing is ever missing ─────
+    for (const [cid, row] of Object.entries(tradesHistory)) {
+      const exists = allTrades.some(t => t.conditionId === cid);
+      if (!exists) {
+        const ts = row.first_seen_ts || 0;
+        allTrades.push({
+          conditionId: cid,
+          ts,
+          time: new Date(ts * 1000).toLocaleString('en-US', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', hour12:true }),
+          title:     row.title,
+          outcome:   row.outcome,
+          actual:    row.actual,
+          notional:  row.notional,
+          price_pct: (row.avg_price || 0) * 100,
+          pnl:       row.pnl,
+          pnl_pct:   row.pnl_pct,
+          status:    row.status,
+          tx:        row.tx_hash || null,
+          eventSlug: row.event_slug,
+        });
+      }
+    }
+
+    // ── Hard-guarantee: every live position has a row ─────────────────────────
     const livePositions = positions.filter(p => p.curPrice > 0 && !p.redeemable);
     for (const p of livePositions) {
       const existingIdx = allTrades.findIndex(t => t.conditionId === p.conditionId);
