@@ -35,6 +35,7 @@ let isRunning        = false;
 let lastKnownBlock   = null;
 let pendingChainTxs  = {}; // txHash → pending row data, replaced when API catches up
 let knownApiTxHashes = new Set(); // tracks what the API already returned
+let scheduledResolutions = {}; // eventSlug → timeoutId — fires gamma check at window close
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 async function sha256(str) {
@@ -222,6 +223,89 @@ async function upsertTradeHistory(pos, resolvedStatus, pnl, pnlPct, actual) {
   if (error) console.error('trades_history save error:', error);
 }
 
+
+// Apply any already-resolved outcomes from outcomeCache to unknown/live trades
+function applyOutcomeCache(trades) {
+  const nowTs = Math.floor(Date.now() / 1000);
+  return trades.map(t => {
+    if (t.status !== 'unknown' && t.status !== 'live') return t;
+    if (!t.eventSlug || !outcomeCache[t.eventSlug]) return t;
+    // For still-live trades, only apply if the window has actually ended
+    if (t.status === 'live') {
+      const m = t.eventSlug.match(/updown-(\d+)m-(\d+)$/);
+      if (!m) return t;
+      const windowEnd = parseInt(m[2]) + parseInt(m[1]) * 60;
+      if (nowTs < windowEnd) return t; // window still open, keep as live
+    }
+    const actual = outcomeCache[t.eventSlug].winner;
+    if (!actual) return t;
+    const won   = actual === t.outcome;
+    const price = (t.price_pct || 0) / 100;
+    return { ...t, actual, status: won ? 'won' : 'lost',
+      pnl:     price > 0 ? (won ? +(t.notional * (1 / price - 1)).toFixed(2) : +(-t.notional).toFixed(2)) : null,
+      pnl_pct: price > 0 ? (won ? +((1 / price - 1) * 100).toFixed(1) : -100) : null,
+    };
+  });
+}
+
+// Schedule a gamma check to fire right when a live position's window closes
+// slug format: "sol-updown-5m-1776230100"  → end = startTs + durationSecs
+function scheduleResolution(eventSlug, conditionId) {
+  if (!eventSlug || scheduledResolutions[eventSlug]) return; // already scheduled
+
+  const m = eventSlug.match(/updown-(\d+)m-(\d+)$/);
+  if (!m) return;
+  const durSecs  = parseInt(m[1]) * 60;
+  const startTs  = parseInt(m[2]);
+  const endTs    = startTs + durSecs;
+  const msUntil  = (endTs * 1000) - Date.now() + 8000; // +8s grace for settlement
+
+  if (msUntil < 0) {
+    // Already past — query gamma immediately (small random delay to avoid stampede)
+    scheduledResolutions[eventSlug] = setTimeout(async () => {
+      delete scheduledResolutions[eventSlug];
+      try {
+        const res  = await fetch(`${GAMMA_API}?slug=${eventSlug}`);
+        const data = await res.json();
+        const mkt  = data?.[0]?.markets?.[0];
+        if (mkt?.closed) applyAndSave(eventSlug, mkt);
+      } catch {}
+    }, Math.random() * 2000);
+    return;
+  }
+
+  scheduledResolutions[eventSlug] = setTimeout(async () => {
+    delete scheduledResolutions[eventSlug];
+    try {
+      const res  = await fetch(`${GAMMA_API}?slug=${eventSlug}`);
+      const data = await res.json();
+      const mkt  = data?.[0]?.markets?.[0];
+      if (!mkt?.closed) {
+        // Not settled yet — retry in 5s
+        scheduledResolutions[eventSlug] = setTimeout(async () => {
+          delete scheduledResolutions[eventSlug];
+          const res2  = await fetch(`${GAMMA_API}?slug=${eventSlug}`);
+          const data2 = await res2.json();
+          const mkt2  = data2?.[0]?.markets?.[0];
+          if (mkt2?.closed) applyAndSave(eventSlug, mkt2);
+        }, 5000);
+        return;
+      }
+      applyAndSave(eventSlug, mkt);
+    } catch {}
+  }, Math.max(msUntil, 0));
+}
+
+function applyAndSave(eventSlug, mkt) {
+  const outcomes = JSON.parse(mkt.outcomes || '[]');
+  const prices   = JSON.parse(mkt.outcomePrices || '[]');
+  const winIdx   = prices.findIndex(p => parseFloat(p) >= 0.99);
+  const winner   = winIdx >= 0 ? outcomes[winIdx] : null;
+  if (!winner) return;
+  saveOutcomeToDB(eventSlug, { winner, outcomes, prices });
+  allTrades = applyOutcomeCache(allTrades);
+  mergeAndRenderTrades();
+}
 
 // Fetch outcomes for slugs we don't have yet — runs in background, then re-renders
 async function fetchMissingOutcomes(trades) {
@@ -464,17 +548,68 @@ function renderPositions(positions) {
 
 
 // ── Render: trades ────────────────────────────────────────────────────────────
+let filterCoin   = 'all';
+let filterResult = 'all';
+let filterDateFrom = null; // JS Date (start of day)
+let filterDateTo   = null; // JS Date (end of day)
+
+function setCoinFilter(val) {
+  filterCoin = val;
+  document.querySelectorAll('[data-coin]').forEach(b => b.classList.toggle('active', b.dataset.coin === val));
+  filterTrades();
+}
+function setResultFilter(val) {
+  filterResult = val;
+  document.querySelectorAll('[data-result]').forEach(b => b.classList.toggle('active', b.dataset.result === val));
+  filterTrades();
+}
+function setDateFilter() {
+  const fromVal = $('date-from').value;
+  const toVal   = $('date-to').value;
+  filterDateFrom = fromVal ? new Date(fromVal + 'T00:00:00') : null;
+  filterDateTo   = toVal   ? new Date(toVal   + 'T23:59:59') : null;
+  $('date-clear').style.display = (fromVal || toVal) ? '' : 'none';
+  filterTrades();
+}
+function clearDateFilter() {
+  $('date-from').value = '';
+  $('date-to').value   = '';
+  filterDateFrom = filterDateTo = null;
+  $('date-clear').style.display = 'none';
+  filterTrades();
+}
+function setQuickSort(val) {
+  document.querySelectorAll('[data-sort]').forEach(b => b.classList.toggle('active', b.dataset.sort === val));
+  if (val === 'newest')  { sortKey = 'ts';      sortDir = -1; }
+  if (val === 'best')    { sortKey = 'pnl';     sortDir = -1; }
+  if (val === 'worst')   { sortKey = 'pnl';     sortDir =  1; }
+  if (val === 'biggest') { sortKey = 'notional'; sortDir = -1; }
+  filterTrades();
+}
+
 function filterTrades() {
   const q = $('search').value.toLowerCase();
-  const filtered = q
-    ? allTrades.filter(t => t.title.toLowerCase().includes(q) || t.outcome.toLowerCase().includes(q))
-    : allTrades;
+  let filtered = allTrades;
+
+  if (q) filtered = filtered.filter(t =>
+    (t.title || '').toLowerCase().includes(q) || (t.outcome || '').toLowerCase().includes(q));
+
+  if (filterCoin !== 'all') filtered = filtered.filter(t =>
+    (t.title || '').toLowerCase().includes(filterCoin.toLowerCase()));
+
+  if (filterResult !== 'all') filtered = filtered.filter(t => t.status === filterResult);
+
+  if (filterDateFrom) filtered = filtered.filter(t => new Date(t.ts * 1000) >= filterDateFrom);
+  if (filterDateTo)   filtered = filtered.filter(t => new Date(t.ts * 1000) <= filterDateTo);
+
   renderTradesTable(filtered);
 }
 
 function sortBy(key) {
   sortDir = sortKey === key ? sortDir * -1 : 1;
   sortKey = key;
+  // Deactivate quick sort buttons when manually clicking a column
+  document.querySelectorAll('[data-sort]').forEach(b => b.classList.remove('active'));
   filterTrades();
 }
 
@@ -519,22 +654,26 @@ function renderTradesTable(trades) {
       pnlCell = pnlPctCell = `<span class="pnl-unknown">—</span>`;
     }
 
+    const tradeDate = new Date(t.ts * 1000);
+    const tradeDateStr = tradeDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const tradeTimeStr = tradeDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+    const mktDateMatch = (t.title || '').match(/(\w+)\s+(\d+),/);
+    const mktDate = mktDateMatch ? mktDateMatch[1].slice(0,3) + ' ' + mktDateMatch[2] : tradeDateStr;
     return `<tr class="${t.status === 'pending' ? 'pending-row' : ''}">
       <td class="time-cell">
-        <span class="time-date">${new Date(t.ts * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
-        <span class="time-hour">${new Date(t.ts * 1000).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}</span>
+        <span class="time-full">${tradeDateStr}, ${tradeTimeStr}</span>
       </td>
       <td class="market-cell">
         ${(() => { const icon = COIN_ICONS[coinName(t.title)]; return icon ? `<img src="${icon}" class="trade-coin-icon" onerror="this.style.display='none'">` : ''; })()}
         <span class="market-meta">
-          <span class="market-date">${new Date(t.ts * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
+          <span class="market-date">${mktDate}</span>
           <span class="market-time-win">${timeWin(t.title)}</span>
         </span>
       </td>
       <td>${betCell}</td>
       <td>${actualCell}</td>
-      <td>$${t.notional.toFixed(2)}</td>
-      <td>${t.price_pct.toFixed(0)}¢</td>
+      <td>$${(t.notional || 0).toFixed(2)}</td>
+      <td>${t.price_pct != null ? t.price_pct.toFixed(0) + '¢' : '—'}</td>
       <td>${pnlCell}</td>
       <td>${pnlPctCell}</td>
       <td><a class="tx-link" href="${txUrl}" target="_blank">${txShort}</a></td>
@@ -573,10 +712,23 @@ async function poll() {
     }
 
     // ── Merge Supabase history into allTrades so nothing is ever missing ─────
+    // Build a set of tx hashes already present from the API so CSV dupes are skipped
+    const knownTxHashes = new Set(allTrades.map(t => t.tx).filter(Boolean));
+    const nowTs = Math.floor(Date.now() / 1000);
     for (const [cid, row] of Object.entries(tradesHistory)) {
-      const exists = allTrades.some(t => t.conditionId === cid);
+      const exists = allTrades.some(t => t.conditionId === cid)
+                  || (row.tx_hash && knownTxHashes.has(row.tx_hash));
       if (!exists) {
         const ts = row.first_seen_ts || 0;
+        // If a 'live' entry's window has already ended, treat as 'unknown' so gamma resolves it
+        let status = row.status;
+        if (status === 'live' && row.event_slug) {
+          const m = row.event_slug.match(/updown-(\d+)m-(\d+)$/);
+          if (m) {
+            const windowEnd = parseInt(m[2]) + parseInt(m[1]) * 60;
+            if (nowTs > windowEnd + 30) status = 'unknown'; // 30s grace
+          }
+        }
         allTrades.push({
           conditionId: cid,
           ts,
@@ -588,7 +740,7 @@ async function poll() {
           price_pct: (row.avg_price || 0) * 100,
           pnl:       row.pnl,
           pnl_pct:   row.pnl_pct,
-          status:    row.status,
+          status,
           tx:        row.tx_hash || null,
           eventSlug: row.event_slug,
         });
@@ -619,24 +771,18 @@ async function poll() {
       } else {
         allTrades = [liveRow, ...allTrades];
       }
+      // Schedule a gamma resolution check to fire right when this window closes
+      scheduleResolution(p.eventSlug, p.conditionId);
     }
 
+    // Apply already-cached outcomes immediately (before background fetch)
+    allTrades = applyOutcomeCache(allTrades);
     mergeAndRenderTrades();
 
-    // Background: fill in missing outcomes from gamma API, re-render if anything changed
+    // Background: fetch any still-missing outcomes from gamma API, re-render if anything new came in
     fetchMissingOutcomes(allTrades).then(changed => {
       if (changed) {
-        allTrades = allTrades.map(t => {
-          if (t.status !== 'unknown' || !t.eventSlug || !outcomeCache[t.eventSlug]) return t;
-          const actual = outcomeCache[t.eventSlug].winner;
-          if (!actual) return t;
-          const won   = actual === t.outcome;
-          const price = t.price_pct / 100;
-          return { ...t, actual, status: won ? 'won' : 'lost',
-            pnl:     won ? +(t.notional * (1 / price - 1)).toFixed(2) : +(-t.notional).toFixed(2),
-            pnl_pct: won ? +((1 / price - 1) * 100).toFixed(1) : -100,
-          };
-        });
+        allTrades = applyOutcomeCache(allTrades);
         mergeAndRenderTrades();
       }
     });
@@ -660,17 +806,7 @@ async function startPolling() {
   setTimeout(async () => {
     const changed = await fetchMissingOutcomes(allTrades);
     if (changed) {
-      allTrades = allTrades.map(t => {
-        if (t.status !== 'unknown' || !t.eventSlug || !outcomeCache[t.eventSlug]) return t;
-        const actual = outcomeCache[t.eventSlug].winner;
-        if (!actual) return t;
-        const won   = actual === t.outcome;
-        const price = t.price_pct / 100;
-        return { ...t, actual, status: won ? 'won' : 'lost',
-          pnl:     won ? +(t.notional * (1 / price - 1)).toFixed(2) : +(-t.notional).toFixed(2),
-          pnl_pct: won ? +((1 / price - 1) * 100).toFixed(1) : -100,
-        };
-      });
+      allTrades = applyOutcomeCache(allTrades);
       mergeAndRenderTrades();
     }
   }, 5000);

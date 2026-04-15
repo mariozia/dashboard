@@ -102,8 +102,62 @@
         <input class="search-input" type="text" id="search"
           placeholder="Search market..." oninput="filterTrades()">
       </div>
+
+      <!-- Filter Bar -->
+      <div class="filter-bar">
+        <div class="filter-group">
+          <span class="filter-label">Coin</span>
+          <div class="filter-chips" id="coin-chips">
+            <button class="chip active" data-coin="all" onclick="setCoinFilter('all')">All</button>
+            <button class="chip" data-coin="Bitcoin" onclick="setCoinFilter('Bitcoin')">BTC</button>
+            <button class="chip" data-coin="Solana" onclick="setCoinFilter('Solana')">SOL</button>
+            <button class="chip" data-coin="Ethereum" onclick="setCoinFilter('Ethereum')">ETH</button>
+            <button class="chip" data-coin="XRP" onclick="setCoinFilter('XRP')">XRP</button>
+            <button class="chip" data-coin="Dogecoin" onclick="setCoinFilter('Dogecoin')">DOGE</button>
+            <button class="chip" data-coin="BNB" onclick="setCoinFilter('BNB')">BNB</button>
+          </div>
+        </div>
+        <div class="filter-group">
+          <span class="filter-label">Result</span>
+          <div class="filter-chips">
+            <button class="chip active" data-result="all" onclick="setResultFilter('all')">All</button>
+            <button class="chip chip-won" data-result="won" onclick="setResultFilter('won')">Won</button>
+            <button class="chip chip-lost" data-result="lost" onclick="setResultFilter('lost')">Lost</button>
+            <button class="chip chip-live" data-result="live" onclick="setResultFilter('live')">Live</button>
+          </div>
+        </div>
+        <div class="filter-group">
+          <span class="filter-label">Date</span>
+          <div class="date-range-wrap">
+            <input type="date" id="date-from" class="date-input" onchange="setDateFilter()">
+            <span class="date-sep">→</span>
+            <input type="date" id="date-to" class="date-input" onchange="setDateFilter()">
+            <button class="chip" id="date-clear" onclick="clearDateFilter()" style="display:none">✕</button>
+          </div>
+        </div>
+        <div class="filter-group">
+          <span class="filter-label">Sort</span>
+          <div class="filter-chips">
+            <button class="chip active" data-sort="newest" onclick="setQuickSort('newest')">Newest</button>
+            <button class="chip" data-sort="best" onclick="setQuickSort('best')">Best P&L</button>
+            <button class="chip" data-sort="worst" onclick="setQuickSort('worst')">Worst P&L</button>
+            <button class="chip" data-sort="biggest" onclick="setQuickSort('biggest')">Biggest</button>
+          </div>
+        </div>
+      </div>
       <div class="table-wrap">
         <table>
+          <colgroup>
+            <col style="width:120px">  <!-- Time -->
+            <col style="width:160px">  <!-- Market -->
+            <col style="width:80px">   <!-- Bot Bet -->
+            <col style="width:100px">  <!-- Actual -->
+            <col style="width:90px">   <!-- Invested -->
+            <col style="width:65px">   <!-- Price -->
+            <col style="width:95px">   <!-- P&L -->
+            <col style="width:80px">   <!-- P&L % -->
+            <col style="width:110px">  <!-- Tx -->
+          </colgroup>
           <thead>
             <tr>
               <th onclick="sortBy('ts')">Time</th>
